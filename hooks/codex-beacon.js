@@ -14,6 +14,8 @@ const permissionDimColor = process.env.CODEX_ATTENTION_PERMISSION_DIM_COLOR || "
 const permissionBrightColor = process.env.CODEX_ATTENTION_PERMISSION_BRIGHT_COLOR || "198,72,86,255";
 const doneColor = process.env.CODEX_ATTENTION_DONE_COLOR || "68,142,104,255";
 const doneDimColor = process.env.CODEX_ATTENTION_DONE_DIM_COLOR || "38,96,76,255";
+const permissionHoldMs = readDurationMs("CODEX_ATTENTION_PERMISSION_HOLD_MS", 1700);
+const doneHoldMs = readDurationMs("CODEX_ATTENTION_DONE_HOLD_MS", 1440);
 
 const EVENTS = {
   permission_request: {
@@ -24,11 +26,11 @@ const EVENTS = {
     bttTrigger: process.env.CODEX_ATTENTION_BTT_PERMISSION_TRIGGER || "",
     touchText: permissionText,
     touchColor: permissionColor,
-    pulse: [
+    pulse: scalePulse([
       { text: permissionText, color: permissionColor, holdMs: 520 },
       { text: permissionText, color: permissionDimColor, holdMs: 360 },
       { text: permissionText, color: permissionBrightColor, holdMs: 820 },
-    ],
+    ], permissionHoldMs),
   },
   turn_done: {
     title: "Codex finished",
@@ -38,10 +40,10 @@ const EVENTS = {
     bttTrigger: process.env.CODEX_ATTENTION_BTT_DONE_TRIGGER || "",
     touchText: doneText,
     touchColor: doneColor,
-    pulse: [
+    pulse: scalePulse([
       { text: doneText, color: doneColor, holdMs: 540 },
       { text: doneText, color: doneDimColor, holdMs: 900 },
-    ],
+    ], doneHoldMs),
   },
 };
 
@@ -60,6 +62,27 @@ function log(message) {
   if (DEBUG) {
     console.error(`[codex-beacon] ${message}`);
   }
+}
+
+function readDurationMs(name, fallbackMs) {
+  const value = Number(process.env[name]);
+  if (!Number.isFinite(value) || value < 0) {
+    return fallbackMs;
+  }
+
+  return value;
+}
+
+function scalePulse(steps, totalMs) {
+  const currentTotalMs = steps.reduce((sum, step) => sum + Number(step.holdMs || 0), 0);
+  if (currentTotalMs <= 0) {
+    return steps;
+  }
+
+  return steps.map((step) => ({
+    ...step,
+    holdMs: Math.round((Number(step.holdMs || 0) / currentTotalMs) * totalMs),
+  }));
 }
 
 function run(command, args, label) {
