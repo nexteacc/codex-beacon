@@ -88,6 +88,9 @@ Please do the following:
    CODEX_ATTENTION_PERMISSION_VOLUME=1.0
    CODEX_ATTENTION_DONE_VOLUME=0.45
 
+   CODEX_ATTENTION_PERMISSION_HOLD_MS=3000
+   CODEX_ATTENTION_DONE_HOLD_MS=2000
+
 7. Merge these hooks into ~/.codex/hooks.json:
 
    PermissionRequest:
@@ -108,7 +111,7 @@ Please do the following:
    - BetterTouchTool web response status is 200
    - Touch Bar changes state and then returns to ☕ Codex
 
-9. Tell me to restart Codex CLI and run:
+9. Tell me to restart Codex CLI/Desktop and run:
 
    /hooks
 

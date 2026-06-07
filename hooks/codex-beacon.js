@@ -8,7 +8,7 @@ const fs = require("node:fs");
 const eventName = process.argv[2] || "unknown";
 const DEBUG = process.argv.includes("--debug") || process.env.CODEX_ATTENTION_DEBUG === "1";
 const permissionText = process.env.CODEX_ATTENTION_PERMISSION_TEXT || "🫶 Needs You";
-const doneText = process.env.CODEX_ATTENTION_DONE_TEXT || "♥ Done";
+const doneText = process.env.CODEX_ATTENTION_DONE_TEXT || "❤️  Done";
 const permissionColor = process.env.CODEX_ATTENTION_PERMISSION_COLOR || "176,54,68,255";
 const permissionDimColor = process.env.CODEX_ATTENTION_PERMISSION_DIM_COLOR || "96,30,40,255";
 const permissionBrightColor = process.env.CODEX_ATTENTION_PERMISSION_BRIGHT_COLOR || "198,72,86,255";
