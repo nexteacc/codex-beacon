@@ -23,31 +23,45 @@ Files in this folder:
 - hooks/codex-beacon.js
 - config.example.env
 - install.sh
+- btt/Codex Beacon.bttpreset
 
 Please do the following:
 
 1. Inspect the current folder and verify those files exist.
 
-2. Check whether BetterTouchTool webserver is reachable:
+2. Check whether BetterTouchTool is installed.
+
+   Look in:
+   - /Applications/BetterTouchTool.app
+   - ~/Applications/BetterTouchTool.app
+
+3. Check whether BetterTouchTool webserver is reachable:
 
    curl -i http://127.0.0.1:12345
 
    A 404 response is OK. Connection refused means I need to enable BetterTouchTool Webserver.
 
-3. Ask me for my BetterTouchTool Touch Bar widget UUID if it is not already known.
+4. Install the BetterTouchTool preset if it is not already installed.
 
-   If I have not created the widget yet, guide me:
-   - Open BetterTouchTool.
-   - Go to Touch Bar.
-   - Add a global Touch Bar Widget.
-   - Choose "Shell Script / Task Widget".
-   - Set its script to:
+   The preset is:
 
-     echo${IFS}☕Codex
+   btt/Codex Beacon.bttpreset
 
-   - Copy the widget UUID.
+   It contains a Touch Bar Shell Script / Task Widget with this fixed UUID:
 
-4. Install the tool into:
+   C0DEC0DE-BEAC-4001-9000-C0DEC0DEC0DE
+
+   First check whether it already exists:
+
+   osascript -e 'tell application "BetterTouchTool" to get_triggers trigger_uuid "C0DEC0DE-BEAC-4001-9000-C0DEC0DEC0DE"'
+
+   If it does not exist, import the preset:
+
+   osascript -e 'tell application "BetterTouchTool" to import_preset "<absolute path to btt/Codex Beacon.bttpreset>"'
+
+   If automatic import fails, guide me to import the preset manually in BetterTouchTool.
+
+5. Install the tool into:
 
    ~/.codex/codex-beacon/
 
@@ -55,7 +69,7 @@ Please do the following:
    - hooks/codex-beacon.js -> ~/.codex/codex-beacon/codex-beacon.js
    - config.example.env -> ~/.codex/codex-beacon/config.env, but do not overwrite an existing config.env unless I approve.
 
-5. Create this wrapper:
+6. Create this wrapper:
 
    ~/.codex/codex-beacon/run.sh
 
@@ -63,11 +77,11 @@ Please do the following:
    - source ~/.codex/codex-beacon/config.env
    - run node ~/.codex/codex-beacon/codex-beacon.js "$@"
 
-6. Edit ~/.codex/codex-beacon/config.env:
+7. Edit ~/.codex/codex-beacon/config.env:
 
    Set:
 
-   CODEX_ATTENTION_BTT_WIDGET_UUID=<my copied UUID>
+   CODEX_ATTENTION_BTT_WIDGET_UUID=C0DEC0DE-BEAC-4001-9000-C0DEC0DEC0DE
    CODEX_ATTENTION_BTT_PORT=12345
 
    Use these defaults unless I ask otherwise:
@@ -91,7 +105,7 @@ Please do the following:
    CODEX_ATTENTION_PERMISSION_HOLD_MS=3000
    CODEX_ATTENTION_DONE_HOLD_MS=2000
 
-7. Merge these hooks into ~/.codex/hooks.json:
+8. Merge these hooks into ~/.codex/hooks.json:
 
    PermissionRequest:
    command = ~/.codex/codex-beacon/run.sh permission_request
@@ -101,7 +115,7 @@ Please do the following:
 
    Preserve existing unrelated hooks.
 
-8. Test manually:
+9. Test manually:
 
    ~/.codex/codex-beacon/run.sh permission_request --debug
    ~/.codex/codex-beacon/run.sh turn_done --debug
@@ -111,13 +125,13 @@ Please do the following:
    - BetterTouchTool web response status is 200
    - Touch Bar changes state and then returns to ☕ Codex
 
-9. Tell me to restart Codex CLI/Desktop and run:
+10. Tell me to restart Codex CLI/Desktop and run:
 
    /hooks
 
    I should review/trust the PermissionRequest and Stop hooks.
 
-10. Final answer should summarize:
+11. Final answer should summarize:
    - What was installed
    - Where the config file is
    - How to change emoji/text/sound later
