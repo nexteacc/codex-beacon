@@ -1,0 +1,26 @@
+{
+  "name": "Default",
+  "states": {
+    "idle": {
+      "text": "☕ Codex",
+      "menuIcon": "☕",
+      "background": "#4A3021",
+      "foreground": "#FFFFFF",
+      "sound": null
+    },
+    "needsYou": {
+      "text": "🫶 Needs You",
+      "menuIcon": "🫶",
+      "background": "#B03646",
+      "foreground": "#FFFFFF",
+      "sound": "Submarine"
+    },
+    "done": {
+      "text": "❤️ Done",
+      "menuIcon": "❤️",
+      "background": "#3F8F68",
+      "foreground": "#FFFFFF",
+      "sound": "Ping"
+    }
+  }
+}

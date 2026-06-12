@@ -1,135 +1,132 @@
 #!/bin/zsh
 set -euo pipefail
 
-SOURCE_DIR="${0:A:h}"
-INSTALL_DIR="$HOME/.codex/codex-beacon"
+ROOT="${0:A:h}"
+APP_NAME="Codex Beacon.app"
+APP_SOURCE="$ROOT/dist/$APP_NAME"
+if [[ ! -d "$APP_SOURCE" ]]; then
+  APP_SOURCE="$ROOT/$APP_NAME"
+fi
+APP_DEST="/Applications/$APP_NAME"
 HOOKS_FILE="$HOME/.codex/hooks.json"
-BTT_WIDGET_UUID="C0DEC0DE-BEAC-4001-9000-C0DEC0DEC0DE"
-BTT_PRESET_PATH="$SOURCE_DIR/btt/Codex Beacon.bttpreset"
+HELPER="$APP_DEST/Contents/Resources/helper/notify.sh"
 
-mkdir -p "$INSTALL_DIR"
-
-cp "$SOURCE_DIR/hooks/codex-beacon.js" "$INSTALL_DIR/codex-beacon.js"
-chmod +x "$INSTALL_DIR/codex-beacon.js"
-
-if [[ ! -f "$INSTALL_DIR/config.env" ]]; then
-  cp "$SOURCE_DIR/config.example.env" "$INSTALL_DIR/config.env"
+if [[ "${1:-}" == "--check" ]]; then
+  [[ -d "$APP_SOURCE" ]] || { echo "Missing app: $APP_SOURCE"; exit 1; }
+  [[ -x "$APP_SOURCE/Contents/Resources/helper/notify.sh" ]] || { echo "Missing helper in app bundle"; exit 1; }
+  /usr/bin/plutil -lint "$APP_SOURCE/Contents/Info.plist" >/dev/null
+  if [[ -f "$HOOKS_FILE" ]]; then
+    /usr/bin/osascript -l JavaScript - "$HOOKS_FILE" <<'JXA' >/dev/null
+function run(argv) {
+  ObjC.import("Foundation");
+  const text = $.NSString.stringWithContentsOfFileEncodingError(argv[0], $.NSUTF8StringEncoding, null);
+  JSON.parse(ObjC.unwrap(text));
+}
+JXA
+  fi
+  echo "Codex Beacon is ready to install."
+  exit 0
 fi
 
-if grep -q '^CODEX_ATTENTION_BTT_WIDGET_UUID=PASTE_YOUR_BTT_WIDGET_UUID_HERE$' "$INSTALL_DIR/config.env"; then
-  perl -0pi -e "s/^CODEX_ATTENTION_BTT_WIDGET_UUID=PASTE_YOUR_BTT_WIDGET_UUID_HERE$/CODEX_ATTENTION_BTT_WIDGET_UUID=$BTT_WIDGET_UUID/m" "$INSTALL_DIR/config.env"
+[[ -d "$APP_SOURCE" ]] || { echo "Missing app: $APP_SOURCE"; exit 1; }
+[[ -x "$APP_SOURCE/Contents/Resources/helper/notify.sh" ]] || { echo "Missing helper in app bundle"; exit 1; }
+
+/usr/bin/osascript -e 'quit application "Codex Beacon"' >/dev/null 2>&1 || true
+/bin/rm -rf "$APP_DEST"
+/usr/bin/ditto "$APP_SOURCE" "$APP_DEST"
+/bin/chmod +x "$HELPER"
+
+/bin/mkdir -p "$HOME/.codex"
+if [[ -f "$HOOKS_FILE" ]]; then
+  /bin/cp "$HOOKS_FILE" "$HOOKS_FILE.codex-beacon-backup"
 fi
 
-cat > "$INSTALL_DIR/run.sh" <<'EOF'
-#!/bin/zsh
-set -euo pipefail
+/usr/bin/osascript -l JavaScript - "$HOOKS_FILE" "$HELPER" <<'JXA'
+function run(argv) {
+ObjC.import("Foundation");
+const hooksPath = argv[0];
+const helper = argv[1];
+const commandHelper = `'${helper.replace(/'/g, "'\\''")}'`;
 
-CONFIG_FILE="${CODEX_ATTENTION_CONFIG:-$HOME/.codex/codex-beacon/config.env}"
-SCRIPT="$HOME/.codex/codex-beacon/codex-beacon.js"
-
-if [[ -f "$CONFIG_FILE" ]]; then
-  set -a
-  source "$CONFIG_FILE"
-  set +a
-fi
-
-exec node "$SCRIPT" "$@"
-EOF
-chmod +x "$INSTALL_DIR/run.sh"
-
-import_btt_preset() {
-  if [[ ! -f "$BTT_PRESET_PATH" ]]; then
-    echo "BetterTouchTool preset not found; skipping preset import."
-    return
-  fi
-
-  if [[ ! -d "/Applications/BetterTouchTool.app" && ! -d "$HOME/Applications/BetterTouchTool.app" ]]; then
-    echo "BetterTouchTool app not found; skipping preset import."
-    return
-  fi
-
-  local existing
-  existing=$(osascript -e "tell application \"BetterTouchTool\" to get_triggers trigger_uuid \"$BTT_WIDGET_UUID\"" 2>/dev/null || true)
-
-  if [[ "$existing" == *"$BTT_WIDGET_UUID"* ]]; then
-    echo "BetterTouchTool Codex Beacon widget already exists."
-    return
-  fi
-
-  if osascript -e "tell application \"BetterTouchTool\" to import_preset \"$BTT_PRESET_PATH\"" >/dev/null 2>&1; then
-    echo "Imported BetterTouchTool Codex Beacon preset."
-  else
-    echo "Could not import BetterTouchTool preset automatically."
-    echo "You can import it manually from: $BTT_PRESET_PATH"
-  fi
+function fileExists(path) {
+  return $.NSFileManager.defaultManager.fileExistsAtPath(path);
 }
 
-import_btt_preset
-
-mkdir -p "$HOME/.codex"
-
-node <<'NODE'
-const fs = require("fs");
-const os = require("os");
-const path = require("path");
-
-const hooksPath = path.join(os.homedir(), ".codex", "hooks.json");
-let data = { hooks: {} };
-
-if (fs.existsSync(hooksPath)) {
-  data = JSON.parse(fs.readFileSync(hooksPath, "utf8"));
-  data.hooks ||= {};
+function readText(path) {
+  const text = $.NSString.stringWithContentsOfFileEncodingError(path, $.NSUTF8StringEncoding, null);
+  return text ? ObjC.unwrap(text) : "";
 }
 
-const beaconCommandPrefix = `${os.homedir()}/.codex/codex-beacon/run.sh`;
-
-function withoutExistingBeaconHooks(groups = []) {
-  return groups
-    .map((group) => ({
-      ...group,
-      hooks: (group.hooks || []).filter((hook) => {
-        return !(typeof hook.command === "string" && hook.command.startsWith(beaconCommandPrefix));
-      }),
-    }))
-    .filter((group) => (group.hooks || []).length > 0);
+function writeText(path, text) {
+  const value = $.NSString.alloc.initWithUTF8String(text);
+  value.writeToFileAtomicallyEncodingError(path, true, $.NSUTF8StringEncoding, null);
 }
 
-data.hooks.PermissionRequest = withoutExistingBeaconHooks(data.hooks.PermissionRequest);
-data.hooks.PermissionRequest.push({
+let root = { hooks: {} };
+if (fileExists(hooksPath)) {
+  root = JSON.parse(readText(hooksPath));
+}
+
+if (!root || typeof root !== "object" || Array.isArray(root)) {
+  root = { hooks: {} };
+}
+if (!root.hooks || typeof root.hooks !== "object" || Array.isArray(root.hooks)) {
+  root.hooks = {};
+}
+
+const ownedFragments = [
+  "codex-beacon-native/notify.sh",
+  "Codex Beacon.app/Contents/Resources/helper/notify.sh",
+  "codex-beacon/run.sh",
+  "codex-mac-attention"
+];
+
+function cleanHooks(items) {
+  if (!Array.isArray(items)) return [];
+  return items
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") return entry;
+      const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
+      const nextHooks = hooks.filter((hook) => {
+        const command = typeof hook?.command === "string" ? hook.command : "";
+        return !ownedFragments.some((fragment) => command.includes(fragment));
+      });
+      return { ...entry, hooks: nextHooks };
+    })
+    .filter((entry) => !Array.isArray(entry?.hooks) || entry.hooks.length > 0);
+}
+
+root.hooks.PermissionRequest = cleanHooks(root.hooks.PermissionRequest);
+root.hooks.Stop = cleanHooks(root.hooks.Stop);
+
+root.hooks.PermissionRequest.push({
   matcher: "*",
   hooks: [
     {
       type: "command",
-      command: `${beaconCommandPrefix} permission_request`,
-      timeout: 6,
-      statusMessage: "Signaling Codex attention",
-    },
-  ],
+      command: `${commandHelper} permission_request`,
+      timeout: 3,
+      statusMessage: "Signaling Codex Beacon"
+    }
+  ]
 });
 
-data.hooks.Stop = withoutExistingBeaconHooks(data.hooks.Stop);
-data.hooks.Stop.push({
+root.hooks.Stop.push({
   hooks: [
     {
       type: "command",
-      command: `${beaconCommandPrefix} turn_done`,
-      timeout: 6,
-      statusMessage: "Signaling Codex completion",
-    },
-  ],
+      command: `${commandHelper} turn_done`,
+      timeout: 3,
+      statusMessage: "Signaling Codex Beacon"
+    }
+  ]
 });
 
-fs.writeFileSync(hooksPath, JSON.stringify(data, null, 2) + "\n");
-console.log(`Updated ${hooksPath}`);
-NODE
+writeText(hooksPath, JSON.stringify(root, null, 2) + "\n");
+}
+JXA
 
-echo
+/usr/bin/open "$APP_DEST"
+
 echo "Installed Codex Beacon."
-echo
-echo "Next steps:"
-echo "1. Make sure BetterTouchTool webserver is enabled on 127.0.0.1:12345."
-echo "2. Optional: edit $INSTALL_DIR/config.env to change text, colors, sounds, or durations."
-echo "3. Test:"
-echo "   $INSTALL_DIR/run.sh permission_request"
-echo "   $INSTALL_DIR/run.sh turn_done"
-echo "4. Restart Codex CLI/Desktop and run /hooks to review/trust the hooks."
+echo "Restart Codex, then trust the updated hooks."
