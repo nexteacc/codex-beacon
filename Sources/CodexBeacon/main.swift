@@ -29,9 +29,11 @@ final class ConfigStore {
 
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Self.secureDirectory(directory)
             if FileManager.default.fileExists(atPath: fileURL.path) {
                 let data = try Data(contentsOf: fileURL)
                 config = try JSONDecoder().decode(BeaconConfig.self, from: data)
+                try? Self.secureFile(fileURL)
                 if config.activePreset == nil {
                     config.activePreset = "default"
                     try? save()
@@ -74,11 +76,205 @@ final class ConfigStore {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(config)
         try data.write(to: fileURL, options: .atomic)
+        try Self.secureDirectory(directoryURL)
+        try Self.secureFile(fileURL)
     }
 
     private static func makeToken() -> String {
         let bytes = (0..<24).map { _ in UInt8.random(in: UInt8.min...UInt8.max) }
         return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func secureDirectory(_ url: URL) throws {
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+    }
+
+    private static func secureFile(_ url: URL) throws {
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+}
+
+enum HookInstallState: Equatable {
+    case installed
+    case missing
+    case moveToApplications
+    case invalid(String)
+
+    var label: String {
+        switch self {
+        case .installed:
+            return "Installed"
+        case .missing:
+            return "Not Installed"
+        case .moveToApplications:
+            return "Move to Applications"
+        case .invalid:
+            return "Needs Repair"
+        }
+    }
+
+    var canInstall: Bool {
+        switch self {
+        case .installed, .moveToApplications:
+            return false
+        case .missing, .invalid:
+            return true
+        }
+    }
+}
+
+final class HookInstaller {
+    private let hooksURL: URL
+    private let helperURL: URL
+    private let expectedAppPath = "/Applications/Codex Beacon.app"
+
+    private let ownedFragments = [
+        "codex-beacon-native/notify.sh",
+        "Codex Beacon.app/Contents/Resources/helper/notify.sh",
+        "codex-beacon/run.sh",
+        "codex-mac-attention"
+    ]
+
+    init() {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        hooksURL = home.appendingPathComponent(".codex/hooks.json")
+        helperURL = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Resources/helper/notify.sh")
+    }
+
+    var isRunningFromApplications: Bool {
+        Bundle.main.bundleURL.path == expectedAppPath
+    }
+
+    func state() -> HookInstallState {
+        guard isRunningFromApplications else {
+            return .moveToApplications
+        }
+        do {
+            let root = try readRoot()
+            return hasExpectedHooks(in: root) ? .installed : .missing
+        } catch {
+            return .invalid(error.localizedDescription)
+        }
+    }
+
+    func install() throws {
+        guard isRunningFromApplications else {
+            throw NSError(
+                domain: "CodexBeacon.Hooks",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Move Codex Beacon to Applications first."]
+            )
+        }
+
+        let directory = hooksURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        if FileManager.default.fileExists(atPath: hooksURL.path) {
+            try backupHooks()
+        }
+
+        let root: [String: Any]
+        do {
+            root = try readRoot()
+        } catch {
+            root = ["hooks": [:]]
+        }
+        var nextRoot = root
+        var hooks = nextRoot["hooks"] as? [String: Any] ?? [:]
+        hooks["PermissionRequest"] = cleanHooks(hooks["PermissionRequest"] as? [[String: Any]] ?? [])
+        hooks["Stop"] = cleanHooks(hooks["Stop"] as? [[String: Any]] ?? [])
+
+        var permissionItems = hooks["PermissionRequest"] as? [[String: Any]] ?? []
+        permissionItems.append([
+            "matcher": "*",
+            "hooks": [[
+                "type": "command",
+                "command": "\(shellQuoted(helperURL.path)) permission_request",
+                "timeout": 3,
+                "statusMessage": "Signaling Codex Beacon"
+            ]]
+        ])
+        hooks["PermissionRequest"] = permissionItems
+
+        var stopItems = hooks["Stop"] as? [[String: Any]] ?? []
+        stopItems.append([
+            "hooks": [[
+                "type": "command",
+                "command": "\(shellQuoted(helperURL.path)) turn_done",
+                "timeout": 3,
+                "statusMessage": "Signaling Codex Beacon"
+            ]]
+        ])
+        hooks["Stop"] = stopItems
+
+        nextRoot["hooks"] = hooks
+        try writeRoot(nextRoot)
+    }
+
+    private func readRoot() throws -> [String: Any] {
+        guard FileManager.default.fileExists(atPath: hooksURL.path) else {
+            return ["hooks": [:]]
+        }
+        let data = try Data(contentsOf: hooksURL)
+        let object = try JSONSerialization.jsonObject(with: data)
+        guard let root = object as? [String: Any] else {
+            return ["hooks": [:]]
+        }
+        return root
+    }
+
+    private func writeRoot(_ root: [String: Any]) throws {
+        let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+        var output = data
+        output.append(0x0A)
+        try output.write(to: hooksURL, options: .atomic)
+    }
+
+    private func backupHooks() throws {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let suffix = formatter.string(from: Date())
+        let backupURL = hooksURL.deletingLastPathComponent()
+            .appendingPathComponent("hooks.json.codex-beacon-\(suffix).backup")
+        try FileManager.default.copyItem(at: hooksURL, to: backupURL)
+    }
+
+    private func hasExpectedHooks(in root: [String: Any]) -> Bool {
+        guard let hooks = root["hooks"] as? [String: Any] else { return false }
+        return containsHelper(in: hooks["PermissionRequest"], event: "permission_request")
+            && containsHelper(in: hooks["Stop"], event: "turn_done")
+    }
+
+    private func containsHelper(in value: Any?, event: String) -> Bool {
+        guard let items = value as? [[String: Any]] else { return false }
+        return items.contains { entry in
+            guard let hooks = entry["hooks"] as? [[String: Any]] else { return false }
+            return hooks.contains { hook in
+                guard let command = hook["command"] as? String else { return false }
+                return command.contains(helperURL.path) && command.contains(event)
+            }
+        }
+    }
+
+    private func cleanHooks(_ items: [[String: Any]]) -> [[String: Any]] {
+        items.compactMap { entry in
+            guard let hookItems = entry["hooks"] as? [[String: Any]] else {
+                return entry
+            }
+            let nextHooks = hookItems.filter { hook in
+                guard let command = hook["command"] as? String else { return true }
+                return !ownedFragments.contains { command.contains($0) }
+            }
+            guard !nextHooks.isEmpty else { return nil }
+            var nextEntry = entry
+            nextEntry["hooks"] = nextHooks
+            return nextEntry
+        }
+    }
+
+    private func shellQuoted(_ path: String) -> String {
+        "'\(path.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 }
 
@@ -86,6 +282,20 @@ enum BeaconState: String, CaseIterable {
     case idle
     case needsYou
     case done
+}
+
+struct BeaconReturnTarget {
+    let processIdentifier: pid_t?
+    let bundleIdentifier: String?
+
+    var isEmpty: Bool {
+        processIdentifier == nil && bundleIdentifier == nil
+    }
+}
+
+struct BeaconEvent {
+    let state: BeaconState
+    let returnTarget: BeaconReturnTarget
 }
 
 struct BeaconStateStyle: Codable, Equatable {
@@ -203,14 +413,101 @@ extension NSColor {
     }
 }
 
+final class StatusDotView: NSView {
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: 8, height: 8)
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 4
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func setColor(_ color: NSColor, tooltip: String) {
+        layer?.backgroundColor = color.cgColor
+        toolTip = tooltip
+    }
+}
+
+final class BeaconToggle: NSControl {
+    private let trackLayer = CALayer()
+    private let knobLayer = CALayer()
+    var isOn: Bool = true {
+        didSet {
+            needsLayout = true
+            updateLayerColors()
+        }
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: 44, height: 24)
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        focusRingType = .none
+        layer?.addSublayer(trackLayer)
+        layer?.addSublayer(knobLayer)
+        knobLayer.shadowColor = NSColor.black.cgColor
+        knobLayer.shadowOpacity = 0.16
+        knobLayer.shadowOffset = NSSize(width: 0, height: 1)
+        knobLayer.shadowRadius = 2
+        updateLayerColors()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+
+        let trackFrame = bounds.insetBy(dx: 0, dy: 1)
+        trackLayer.frame = trackFrame
+        trackLayer.cornerRadius = trackFrame.height / 2
+
+        let knobSize = trackFrame.height - 4
+        let knobX = isOn ? trackFrame.maxX - knobSize - 2 : trackFrame.minX + 2
+        knobLayer.frame = NSRect(x: knobX, y: trackFrame.minY + 2, width: knobSize, height: knobSize)
+        knobLayer.cornerRadius = knobSize / 2
+        knobLayer.shadowPath = CGPath(ellipseIn: knobLayer.bounds, transform: nil)
+
+        CATransaction.commit()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        isOn.toggle()
+        sendAction(action, to: target)
+    }
+
+    private func updateLayerColors() {
+        trackLayer.backgroundColor = (isOn ? NSColor.systemGreen : NSColor.controlColor).cgColor
+        knobLayer.backgroundColor = NSColor.white.cgColor
+    }
+}
+
 final class SettingsViewController: NSViewController {
     private let configStore: ConfigStore
+    private let hookInstaller: HookInstaller
     private let onChange: () -> Void
-    private let touchBarSwitch = NSSwitch()
-    private let soundSwitch = NSSwitch()
+    private let touchBarSwitch = BeaconToggle()
+    private let soundSwitch = BeaconToggle()
+    private let hooksButton = NSButton(title: "Install Hooks", target: nil, action: nil)
+    private let serverDot = StatusDotView()
+    private var isServerReady = false
 
-    init(configStore: ConfigStore, onChange: @escaping () -> Void) {
+    init(configStore: ConfigStore, hookInstaller: HookInstaller, isServerReady: Bool, onChange: @escaping () -> Void) {
         self.configStore = configStore
+        self.hookInstaller = hookInstaller
+        self.isServerReady = isServerReady
         self.onChange = onChange
         super.init(nibName: nil, bundle: nil)
     }
@@ -220,67 +517,147 @@ final class SettingsViewController: NSViewController {
     }
 
     override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 168))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 142))
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
-        let title = NSTextField(labelWithString: "Codex Beacon")
-        title.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
-        title.alignment = .center
-        title.translatesAutoresizingMaskIntoConstraints = false
-
         let touchBarRow = row(title: "Touch Bar", control: touchBarSwitch)
         let soundRow = row(title: "Sound", control: soundSwitch)
+        let hooksRow = hookRow()
 
-        let stack = NSStackView(views: [title, touchBarRow, soundRow])
+        let stack = NSStackView(views: [touchBarRow, soundRow, hooksRow])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 18
+        stack.spacing = 13
         stack.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(stack)
 
+        serverDot.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(serverDot)
+
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 28),
-            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -28),
+            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
             stack.centerYAnchor.constraint(equalTo: root.centerYAnchor),
-            title.widthAnchor.constraint(equalTo: stack.widthAnchor)
+            serverDot.topAnchor.constraint(equalTo: root.topAnchor, constant: 14),
+            serverDot.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            serverDot.widthAnchor.constraint(equalToConstant: 8),
+            serverDot.heightAnchor.constraint(equalToConstant: 8)
         ])
 
         touchBarSwitch.target = self
         touchBarSwitch.action = #selector(touchBarChanged)
         soundSwitch.target = self
         soundSwitch.action = #selector(soundChanged)
+        hooksButton.target = self
+        hooksButton.action = #selector(installHooks)
 
         self.view = root
         refresh()
     }
 
     func refresh() {
-        touchBarSwitch.state = configStore.config.touchBarVisual ? .on : .off
-        soundSwitch.state = configStore.config.sound ? .on : .off
+        touchBarSwitch.isOn = configStore.config.touchBarVisual
+        soundSwitch.isOn = configStore.config.sound
+        serverDot.setColor(isServerReady ? .systemGreen : .systemRed, tooltip: isServerReady ? "Ready" : "Port busy")
+        refreshHooks()
+    }
+
+    func setServerReady(_ ready: Bool) {
+        isServerReady = ready
+        refresh()
     }
 
     private func row(title: String, control: NSView) -> NSView {
         let label = NSTextField(labelWithString: title)
-        label.font = NSFont.systemFont(ofSize: 15, weight: .medium)
+        label.font = NSFont.systemFont(ofSize: 13, weight: .medium)
 
         let row = NSStackView(views: [label, control])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.distribution = .gravityAreas
         row.translatesAutoresizingMaskIntoConstraints = false
-        row.widthAnchor.constraint(equalToConstant: 264).isActive = true
+        row.widthAnchor.constraint(equalToConstant: 252).isActive = true
+        label.widthAnchor.constraint(equalToConstant: 92).isActive = true
         return row
     }
 
+    private func hookRow() -> NSView {
+        let label = NSTextField(labelWithString: "Hooks")
+        label.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+
+        hooksButton.bezelStyle = .rounded
+        hooksButton.controlSize = .small
+        hooksButton.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+
+        let row = NSStackView(views: [label, spacer, hooksButton])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.widthAnchor.constraint(equalToConstant: 252).isActive = true
+        label.widthAnchor.constraint(equalToConstant: 92).isActive = true
+        hooksButton.widthAnchor.constraint(equalToConstant: 68).isActive = true
+        return row
+    }
+
+    private func refreshHooks() {
+        let state = hookInstaller.state()
+        switch state {
+        case .installed:
+            hooksButton.title = "Repair"
+            hooksButton.toolTip = "Hooks installed"
+            hooksButton.isEnabled = true
+        case .invalid:
+            hooksButton.title = "Repair"
+            hooksButton.toolTip = "Hooks need repair"
+            hooksButton.isEnabled = true
+        case .moveToApplications:
+            hooksButton.title = "Install"
+            hooksButton.toolTip = "Move to Applications first"
+            hooksButton.isEnabled = false
+        case .missing:
+            hooksButton.title = "Install"
+            hooksButton.toolTip = "Hooks not installed"
+            hooksButton.isEnabled = state.canInstall
+        }
+    }
+
     @objc private func touchBarChanged() {
-        configStore.setTouchBarVisual(touchBarSwitch.state == .on)
+        configStore.setTouchBarVisual(touchBarSwitch.isOn)
         onChange()
     }
 
     @objc private func soundChanged() {
-        configStore.setSound(soundSwitch.state == .on)
+        configStore.setSound(soundSwitch.isOn)
         onChange()
+    }
+
+    @objc private func installHooks() {
+        do {
+            try hookInstaller.install()
+            refreshHooks()
+            showAlert(title: "Hooks Installed", message: "Restart Codex, then trust the updated hooks.")
+        } catch {
+            refreshHooks()
+            showAlert(title: "Hooks Failed", message: error.localizedDescription)
+        }
+    }
+
+    private func showAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        if let window = view.window ?? NSApp.keyWindow {
+            alert.beginSheetModal(for: window) { _ in }
+        } else {
+            alert.runModal()
+        }
     }
 }
 
@@ -483,9 +860,9 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
 final class BeaconServer {
     private let listener: NWListener
     private let tokenProvider: () -> String?
-    private let onEvent: (BeaconState) -> Void
+    private let onEvent: (BeaconEvent) -> Void
 
-    init(port: UInt16, tokenProvider: @escaping () -> String?, onEvent: @escaping (BeaconState) -> Void) throws {
+    init(port: UInt16, tokenProvider: @escaping () -> String?, onEvent: @escaping (BeaconEvent) -> Void) throws {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(
             host: .ipv4(IPv4Address("127.0.0.1")!),
@@ -513,9 +890,9 @@ final class BeaconServer {
 
             let request = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
             let response: String
-            if let state = self.state(from: request) {
+            if let event = self.event(from: request) {
                 DispatchQueue.main.async {
-                    self.onEvent(state)
+                    self.onEvent(event)
                 }
                 response = Self.response(status: "200 OK", body: "ok\n")
             } else {
@@ -528,7 +905,7 @@ final class BeaconServer {
         }
     }
 
-    private func state(from request: String) -> BeaconState? {
+    private func event(from request: String) -> BeaconEvent? {
         guard let requestLine = request.components(separatedBy: "\r\n").first,
               requestLine.hasPrefix("GET /event?") else {
             return nil
@@ -553,13 +930,41 @@ final class BeaconServer {
             return nil
         }
 
+        let state: BeaconState
         if query["type"] == "permission_request" || query["type"] == "needs_you" {
-            return .needsYou
+            state = .needsYou
+        } else if query["type"] == "turn_done" || query["type"] == "done" {
+            state = .done
+        } else {
+            return nil
         }
-        if query["type"] == "turn_done" || query["type"] == "done" {
-            return .done
+
+        return BeaconEvent(
+            state: state,
+            returnTarget: BeaconReturnTarget(
+                processIdentifier: sanitizedProcessIdentifier(query["return_pid"]),
+                bundleIdentifier: sanitizedBundleIdentifier(query["return_bundle"])
+            )
+        )
+    }
+
+    private func sanitizedProcessIdentifier(_ value: String?) -> pid_t? {
+        guard let value,
+              let identifier = Int32(value),
+              identifier > 1 else {
+            return nil
         }
-        return nil
+        return identifier
+    }
+
+    private func sanitizedBundleIdentifier(_ value: String?) -> String? {
+        guard let value,
+              !value.isEmpty,
+              value.count <= 200,
+              value.range(of: #"^[A-Za-z0-9.-]+$"#, options: .regularExpression) != nil else {
+            return nil
+        }
+        return value
     }
 
     private static func response(status: String, body: String) -> String {
@@ -576,6 +981,7 @@ final class BeaconServer {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let configStore = ConfigStore()
+    private let hookInstaller = HookInstaller()
     private lazy var presetStore = PresetStore(appSupportDirectory: configStore.directoryURL)
     private lazy var touchBarBeacon = TouchBarBeacon { [weak self] in
         self?.activateCodex()
@@ -587,6 +993,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var touchBarMenuItem: NSMenuItem?
     private var soundMenuItem: NSMenuItem?
+    private var isServerReady = false
+    private var returnTarget = BeaconReturnTarget(processIdentifier: nil, bundleIdentifier: nil)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupWindow()
@@ -603,13 +1011,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupWindow() {
-        let controller = SettingsViewController(configStore: configStore) { [weak self] in
+        let controller = SettingsViewController(configStore: configStore, hookInstaller: hookInstaller, isServerReady: isServerReady) { [weak self] in
             self?.applyConfig()
         }
         settingsController = controller
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 168),
+            contentRect: NSRect(x: 0, y: 0, width: 340, height: 218),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -647,11 +1055,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             server = try BeaconServer(port: 17321, tokenProvider: { [weak self] in
                 self?.configStore.reload()
                 return self?.configStore.config.authToken
-            }) { [weak self] state in
-                self?.display(state)
+            }) { [weak self] event in
+                self?.display(event)
             }
             server?.start()
+            isServerReady = true
+            settingsController?.setServerReady(true)
         } catch {
+            isServerReady = false
+            settingsController?.setServerReady(false)
             NSLog("Codex Beacon server error: \(error.localizedDescription)")
         }
     }
@@ -671,11 +1083,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         soundMenuItem?.state = configStore.config.sound ? .on : .off
     }
 
-    private func display(_ state: BeaconState) {
+    private func display(_ event: BeaconEvent) {
+        returnTarget = event.returnTarget
         configStore.reload()
         presetStore.reload(activePresetName: configStore.config.presetName)
         refreshMenu()
         resetWorkItem?.cancel()
+        let state = event.state
         let style = presetStore.preset.style(for: state)
 
         if configStore.config.touchBarVisual {
@@ -728,17 +1142,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func activateCodex() {
-        let candidates = ["Codex", "iTerm2", "Terminal"]
-        let apps = NSWorkspace.shared.runningApplications
-
-        for name in candidates {
-            if let app = apps.first(where: { runningApp in
-                runningApp.localizedName == name && runningApp.bundleIdentifier != Bundle.main.bundleIdentifier
-            }) {
-                app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-                return
-            }
+        if activate(returnTarget) {
+            return
         }
+
+        if activate(bundleIdentifier: "com.openai.codex", allowLaunch: true) {
+            return
+        }
+
+        if activate(appNamed: "Codex") {
+            return
+        }
+
+        NSLog("Codex Beacon has no valid return target")
+    }
+
+    private func activate(_ target: BeaconReturnTarget) -> Bool {
+        guard !target.isEmpty else { return false }
+
+        let apps = NSWorkspace.shared.runningApplications
+        if let processIdentifier = target.processIdentifier,
+           let app = apps.first(where: { $0.processIdentifier == processIdentifier && isActivatable($0) }),
+           activate(app) {
+            return true
+        }
+
+        guard let bundleIdentifier = target.bundleIdentifier else {
+            return false
+        }
+        return activate(bundleIdentifier: bundleIdentifier, allowLaunch: false)
+    }
+
+    private func activate(bundleIdentifier: String, allowLaunch: Bool) -> Bool {
+        let apps = NSWorkspace.shared.runningApplications
+        if let app = apps.first(where: { $0.bundleIdentifier == bundleIdentifier && isActivatable($0) }),
+           activate(app) {
+            return true
+        }
+
+        guard allowLaunch,
+              let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else {
+            return false
+        }
+
+        return NSWorkspace.shared.open(url)
+    }
+
+    private func activate(appNamed name: String) -> Bool {
+        let apps = NSWorkspace.shared.runningApplications
+        guard let app = apps.first(where: { runningApp in
+            guard isActivatable(runningApp) else { return false }
+            return runningApp.localizedName?.localizedCaseInsensitiveCompare(name) == .orderedSame
+        }) else {
+            return false
+        }
+        return activate(app)
+    }
+
+    private func isActivatable(_ app: NSRunningApplication) -> Bool {
+        app.bundleIdentifier != Bundle.main.bundleIdentifier && app.activationPolicy == .regular
+    }
+
+    @discardableResult
+    private func activate(_ app: NSRunningApplication) -> Bool {
+        let didActivate = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        if !didActivate {
+            NSLog("Codex Beacon failed to activate \(app.localizedName ?? app.bundleIdentifier ?? "unknown app")")
+        }
+        return didActivate
     }
 
     @objc private func toggleTouchBar() {

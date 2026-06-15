@@ -8,6 +8,8 @@
   <string>CodexBeacon</string>
   <key>CFBundleIdentifier</key>
   <string>com.codexbeacon.native</string>
+  <key>CFBundleIconFile</key>
+  <string>CodexBeacon</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>

@@ -16,7 +16,9 @@ mkdir -p "$MACOS" "$RESOURCES"
 
 cp ".build/release/CodexBeacon" "$MACOS/CodexBeacon"
 cp "$ROOT/Info.plist" "$CONTENTS/Info.plist"
-cp -R "$ROOT/Resources/." "$RESOURCES/"
+cp "$ROOT/Resources/CodexBeacon.icns" "$RESOURCES/CodexBeacon.icns"
+cp -R "$ROOT/Resources/Presets" "$RESOURCES/Presets"
+cp -R "$ROOT/Resources/helper" "$RESOURCES/helper"
 chmod +x "$MACOS/CodexBeacon"
 chmod +x "$RESOURCES/helper/notify.sh"
 
