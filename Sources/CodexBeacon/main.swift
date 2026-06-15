@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import Network
 import ObjectiveC
+import QuartzCore
 
 struct BeaconConfig: Codable, Equatable {
     var touchBarVisual: Bool
@@ -384,14 +385,23 @@ struct CodexUsageWindow: Codable {
     let resetInSeconds: Int
 }
 
+struct CodexUsageDisplay: Equatable {
+    let text: String
+    let isLimited: Bool
+    let isReady: Bool
+    let pulseKey: String?
+    let resetAt: Int?
+}
+
 struct CodexUsageSnapshot: Codable {
     let ok: Bool
     let updatedAt: String
     let planType: String?
+    let rateLimitReachedType: String?
     let primary: CodexUsageWindow
     let secondary: CodexUsageWindow?
 
-    func displayText(for selection: UsageWindowSelection) -> String? {
+    func display(for selection: UsageWindowSelection) -> CodexUsageDisplay? {
         let window: CodexUsageWindow?
         switch selection {
         case .fiveHour:
@@ -400,7 +410,56 @@ struct CodexUsageSnapshot: Codable {
             window = secondary
         }
         guard let window else { return nil }
-        return "\(window.label) \(Int(window.remainingPercent.rounded()))% · \(window.resetDisplayText)"
+
+        if isLimited(window: window, selection: selection) {
+            if window.isPastResetGracePeriod {
+                return CodexUsageDisplay(
+                    text: "Ready",
+                    isLimited: false,
+                    isReady: true,
+                    pulseKey: "\(selection.rawValue):\(window.resetsAt):ready",
+                    resetAt: window.resetsAt
+                )
+            }
+
+            return CodexUsageDisplay(
+                text: "Back \(window.resetDisplayText)",
+                isLimited: true,
+                isReady: false,
+                pulseKey: "\(selection.rawValue):\(window.resetsAt):\(rateLimitReachedType ?? "used")",
+                resetAt: window.resetsAt
+            )
+        }
+
+        return CodexUsageDisplay(
+            text: "\(window.label) \(Int(window.remainingPercent.rounded()))% · \(window.resetDisplayText)",
+            isLimited: false,
+            isReady: false,
+            pulseKey: nil,
+            resetAt: window.resetsAt
+        )
+    }
+
+    private func isLimited(window: CodexUsageWindow, selection: UsageWindowSelection) -> Bool {
+        if window.remainingPercent <= 0 {
+            return true
+        }
+
+        guard let reachedType = rateLimitReachedType?.lowercased(), !reachedType.isEmpty else {
+            return false
+        }
+
+        switch selection {
+        case .fiveHour:
+            return reachedType.contains("primary")
+                || reachedType.contains("5h")
+                || reachedType.contains("five")
+                || reachedType == "codex"
+        case .weekly:
+            return reachedType.contains("secondary")
+                || reachedType.contains("weekly")
+                || reachedType.contains("week")
+        }
     }
 }
 
@@ -412,6 +471,10 @@ extension CodexUsageWindow {
         formatter.timeZone = .current
         formatter.dateFormat = windowMinutes >= 1_440 ? "MMM d" : "HH:mm"
         return formatter.string(from: date)
+    }
+
+    var isPastResetGracePeriod: Bool {
+        Date().timeIntervalSince1970 >= TimeInterval(resetsAt + 8)
     }
 }
 
@@ -503,6 +566,7 @@ final class CodexUsageReader {
             ok: true,
             updatedAt: updatedAt,
             planType: rateLimits["plan_type"] as? String,
+            rateLimitReachedType: stringValue(rateLimits["rate_limit_reached_type"]),
             primary: primary,
             secondary: secondary
         )
@@ -557,6 +621,13 @@ final class CodexUsageReader {
         if let value = value as? Double { return Int(value) }
         if let value = value as? String { return Int(value) }
         return nil
+    }
+
+    private func stringValue(_ value: Any?) -> String? {
+        guard let value = value as? String, !value.isEmpty else {
+            return nil
+        }
+        return value
     }
 
     private func isoString(_ date: Date) -> String {
@@ -974,15 +1045,18 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
     private let modalItem: NSCustomTouchBarItem
     private let modalTouchBar: NSTouchBar
     private var style = BeaconPreset.default.style(for: .idle)
-    private var usageText: String?
+    private var usageDisplay: CodexUsageDisplay?
+    private var usageShouldPulse = false
     private var installed = false
-    private let onTap: () -> Void
+    private let onCodexTap: () -> Void
+    private let onUsageTap: () -> Void
 
-    init(onTap: @escaping () -> Void) {
+    init(onCodexTap: @escaping () -> Void, onUsageTap: @escaping () -> Void) {
         trayItem = NSCustomTouchBarItem(identifier: trayIdentifier)
         modalItem = NSCustomTouchBarItem(identifier: modalIdentifier)
         modalTouchBar = NSTouchBar()
-        self.onTap = onTap
+        self.onCodexTap = onCodexTap
+        self.onUsageTap = onUsageTap
         super.init()
         modalTouchBar.delegate = self
         modalTouchBar.defaultItemIdentifiers = [modalIdentifier]
@@ -1020,8 +1094,9 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
         updateViews()
     }
 
-    func setUsageText(_ text: String?) {
-        usageText = text
+    func setUsage(_ display: CodexUsageDisplay?, pulse: Bool = false) {
+        usageDisplay = display
+        usageShouldPulse = pulse
         updateViews()
     }
 
@@ -1065,7 +1140,9 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
 
     private func updateViews() {
         trayItem.view = statusView(style: style, width: 120, height: 30, fontSize: 13)
-        modalItem.view = fullTouchBarView(style: style, usageText: usageText)
+        let shouldPulse = usageShouldPulse
+        modalItem.view = fullTouchBarView(style: style, usageDisplay: usageDisplay, pulse: shouldPulse)
+        usageShouldPulse = false
     }
 
     private func callSystemModalPlacement(selector: Selector) -> Bool {
@@ -1109,12 +1186,12 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
         return dlsym(handle, name)
     }
 
-    private func fullTouchBarView(style: BeaconStateStyle, usageText: String?) -> NSView {
+    private func fullTouchBarView(style: BeaconStateStyle, usageDisplay: CodexUsageDisplay?, pulse: Bool) -> NSView {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 980, height: 36))
         container.wantsLayer = true
         container.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.04).cgColor
 
-        let status = usageText.map { unifiedUsageView(style: style, usageText: $0, width: 310, height: 32) }
+        let status = usageDisplay.map { unifiedUsageView(style: style, usageDisplay: $0, width: 310, height: 32, pulse: pulse) }
             ?? statusView(style: style, width: 300, height: 32, fontSize: 17)
         status.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(status)
@@ -1122,19 +1199,32 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
         NSLayoutConstraint.activate([
             status.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             status.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            status.widthAnchor.constraint(equalToConstant: usageText == nil ? 300 : 310),
+            status.widthAnchor.constraint(equalToConstant: usageDisplay == nil ? 300 : 310),
             status.heightAnchor.constraint(equalToConstant: 32)
         ])
 
         return container
     }
 
-    private func unifiedUsageView(style: BeaconStateStyle, usageText: String, width: CGFloat, height: CGFloat) -> NSView {
+    private func unifiedUsageView(style: BeaconStateStyle, usageDisplay: CodexUsageDisplay, width: CGFloat, height: CGFloat, pulse: Bool) -> NSView {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor(calibratedRed: 0.18, green: 0.17, blue: 0.15, alpha: 1.0).cgColor
+        let background: NSColor
+        if usageDisplay.isLimited {
+            background = NSColor(calibratedRed: 0.28, green: 0.10, blue: 0.10, alpha: 1.0)
+        } else if usageDisplay.isReady {
+            background = NSColor(calibratedRed: 0.11, green: 0.23, blue: 0.16, alpha: 1.0)
+        } else {
+            background = NSColor(calibratedRed: 0.18, green: 0.17, blue: 0.15, alpha: 1.0)
+        }
+        container.layer?.backgroundColor = background.cgColor
         container.layer?.cornerRadius = 10
+        container.layer?.borderWidth = (usageDisplay.isLimited || usageDisplay.isReady) ? 1 : 0
+        container.layer?.borderColor = usageBorderColor(for: usageDisplay).cgColor
         container.toolTip = "Open Codex"
+        if (usageDisplay.isLimited || usageDisplay.isReady) && pulse {
+            addUsagePulse(to: container.layer, from: background, to: usagePulseColor(for: usageDisplay))
+        }
 
         let button = NSButton(title: "", target: self, action: #selector(openCodex))
         button.isBordered = false
@@ -1159,13 +1249,23 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
         separator.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(separator)
 
-        let usage = NSTextField(labelWithString: usageText)
+        let usage = NSTextField(labelWithString: usageDisplay.text)
         usage.alignment = .right
         usage.lineBreakMode = .byTruncatingTail
-        usage.textColor = NSColor.white.withAlphaComponent(0.86)
+        usage.textColor = usageTextColor(for: usageDisplay)
         usage.font = NSFont.monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
         usage.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(usage)
+
+        let usageButton = NSButton(title: "", target: self, action: #selector(toggleUsageWindow))
+        usageButton.isBordered = false
+        usageButton.bezelStyle = .regularSquare
+        usageButton.setButtonType(.momentaryPushIn)
+        usageButton.wantsLayer = true
+        usageButton.layer?.backgroundColor = NSColor.clear.cgColor
+        usageButton.toolTip = "Switch usage window"
+        usageButton.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(usageButton)
 
         NSLayoutConstraint.activate([
             button.leadingAnchor.constraint(equalTo: container.leadingAnchor),
@@ -1180,10 +1280,54 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
 
             usage.leadingAnchor.constraint(equalTo: separator.trailingAnchor, constant: 12),
             usage.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
-            usage.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+            usage.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+
+            usageButton.leadingAnchor.constraint(equalTo: separator.trailingAnchor),
+            usageButton.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            usageButton.topAnchor.constraint(equalTo: container.topAnchor),
+            usageButton.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         ])
 
         return container
+    }
+
+    private func usageBorderColor(for display: CodexUsageDisplay) -> NSColor {
+        if display.isLimited {
+            return NSColor(calibratedRed: 0.78, green: 0.24, blue: 0.24, alpha: 0.55)
+        }
+        if display.isReady {
+            return NSColor(calibratedRed: 0.31, green: 0.76, blue: 0.47, alpha: 0.50)
+        }
+        return NSColor.clear
+    }
+
+    private func usagePulseColor(for display: CodexUsageDisplay) -> NSColor {
+        if display.isReady {
+            return NSColor(calibratedRed: 0.16, green: 0.36, blue: 0.24, alpha: 1.0)
+        }
+        return NSColor(calibratedRed: 0.44, green: 0.13, blue: 0.12, alpha: 1.0)
+    }
+
+    private func usageTextColor(for display: CodexUsageDisplay) -> NSColor {
+        if display.isLimited {
+            return NSColor(calibratedRed: 1.0, green: 0.84, blue: 0.78, alpha: 0.95)
+        }
+        if display.isReady {
+            return NSColor(calibratedRed: 0.82, green: 1.0, blue: 0.88, alpha: 0.95)
+        }
+        return NSColor.white.withAlphaComponent(0.86)
+    }
+
+    private func addUsagePulse(to layer: CALayer?, from background: NSColor, to highlight: NSColor) {
+        guard let layer else { return }
+        let animation = CABasicAnimation(keyPath: "backgroundColor")
+        animation.fromValue = background.cgColor
+        animation.toValue = highlight.cgColor
+        animation.duration = 0.85
+        animation.autoreverses = true
+        animation.repeatCount = 8
+        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer.add(animation, forKey: "codexBeaconLimitedPulse")
     }
 
     private func statusView(style: BeaconStateStyle, width: CGFloat, height: CGFloat, fontSize: CGFloat) -> NSView {
@@ -1223,7 +1367,12 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
 
     @objc private func openCodex() {
         NSLog("Codex Beacon Touch Bar item tapped")
-        onTap()
+        onCodexTap()
+    }
+
+    @objc private func toggleUsageWindow() {
+        NSLog("Codex Beacon usage item tapped")
+        onUsageTap()
     }
 }
 
@@ -1398,9 +1547,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let hookInstaller = HookInstaller()
     private let usageReader = CodexUsageReader()
     private lazy var presetStore = PresetStore(appSupportDirectory: configStore.directoryURL)
-    private lazy var touchBarBeacon = TouchBarBeacon { [weak self] in
-        self?.activateCodex()
-    }
+    private lazy var touchBarBeacon = TouchBarBeacon(
+        onCodexTap: { [weak self] in
+            self?.activateCodex()
+        },
+        onUsageTap: { [weak self] in
+            self?.toggleUsageWindowFromTouchBar()
+        }
+    )
     private var settingsController: SettingsViewController?
     private var window: NSWindow?
     private var server: BeaconServer?
@@ -1412,6 +1566,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isServerReady = false
     private var currentState: BeaconState = .idle
     private var returnTarget = BeaconReturnTarget(processIdentifier: nil, bundleIdentifier: nil)
+    private var limitedUsagePulseKey: String?
+    private var readyUsagePulseKey: String?
+    private var usageRecoveryWorkItem: DispatchWorkItem?
+    private var usageRecoveryKey: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupWindow()
@@ -1514,7 +1672,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let state = event.state
         currentState = state
         let style = presetStore.preset.style(for: state)
-        touchBarBeacon.setUsageText(nil)
+        touchBarBeacon.setUsage(nil)
 
         if configStore.config.touchBarVisual {
             touchBarBeacon.setStyle(style)
@@ -1552,16 +1710,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func refreshUsageDisplay() {
+    private func refreshUsageDisplay(triggeredByRecoveryTimer: Bool = false) {
         configStore.reload()
         guard currentState == .idle,
-              let usageText = usageReader.latestSnapshot()?.displayText(for: configStore.config.selectedUsageWindow) else {
+              let usageDisplay = usageReader.latestSnapshot()?.display(for: configStore.config.selectedUsageWindow) else {
             if currentState == .idle {
-                touchBarBeacon.setUsageText(nil)
+                touchBarBeacon.setUsage(nil)
             }
+            limitedUsagePulseKey = nil
+            readyUsagePulseKey = nil
+            cancelUsageRecovery()
             return
         }
-        touchBarBeacon.setUsageText(usageText)
+
+        if usageDisplay.isLimited {
+            scheduleUsageRecovery(for: usageDisplay)
+        } else {
+            cancelUsageRecovery()
+        }
+
+        let shouldPulse: Bool
+        if usageDisplay.isLimited {
+            shouldPulse = usageDisplay.pulseKey != limitedUsagePulseKey
+            limitedUsagePulseKey = usageDisplay.pulseKey
+            readyUsagePulseKey = nil
+        } else if usageDisplay.isReady {
+            shouldPulse = usageDisplay.pulseKey != readyUsagePulseKey
+            readyUsagePulseKey = usageDisplay.pulseKey
+            limitedUsagePulseKey = nil
+        } else {
+            shouldPulse = false
+            limitedUsagePulseKey = nil
+            readyUsagePulseKey = nil
+        }
+
+        touchBarBeacon.setUsage(usageDisplay, pulse: shouldPulse)
+
+        if triggeredByRecoveryTimer && usageDisplay.isReady && configStore.config.sound {
+            NSSound(named: NSSound.Name("Ping"))?.play()
+        }
+    }
+
+    private func scheduleUsageRecovery(for display: CodexUsageDisplay) {
+        guard let resetAt = display.resetAt,
+              let key = display.pulseKey else {
+            cancelUsageRecovery()
+            return
+        }
+        guard usageRecoveryKey != key else { return }
+
+        usageRecoveryWorkItem?.cancel()
+        usageRecoveryKey = key
+
+        let fireAt = TimeInterval(resetAt + 8)
+        let delay = max(1, fireAt - Date().timeIntervalSince1970)
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.usageRecoveryKey = nil
+            self.usageRecoveryWorkItem = nil
+            self.refreshUsageDisplay(triggeredByRecoveryTimer: true)
+            if self.configStore.config.touchBarVisual {
+                self.touchBarBeacon.present()
+            }
+        }
+        usageRecoveryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func cancelUsageRecovery() {
+        usageRecoveryWorkItem?.cancel()
+        usageRecoveryWorkItem = nil
+        usageRecoveryKey = nil
+    }
+
+    private func toggleUsageWindowFromTouchBar() {
+        configStore.reload()
+        let nextSelection: UsageWindowSelection = configStore.config.selectedUsageWindow == .fiveHour ? .weekly : .fiveHour
+        configStore.setUsageWindow(nextSelection)
+        settingsController?.refresh()
+        refreshUsageDisplay()
+        if configStore.config.touchBarVisual {
+            touchBarBeacon.present()
+        }
     }
 
     @objc private func showSettings() {
