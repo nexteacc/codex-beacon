@@ -115,10 +115,23 @@ enum HookInstallState: Equatable {
 
     var canInstall: Bool {
         switch self {
-        case .installed, .moveToApplications:
+        case .installed:
             return false
-        case .missing, .invalid:
+        case .missing, .moveToApplications, .invalid:
             return true
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .installed:
+            return "Hooks installed"
+        case .missing:
+            return "Hooks not installed"
+        case .moveToApplications:
+            return "Move Codex Beacon to Applications first."
+        case .invalid(let message):
+            return message
         }
     }
 }
@@ -131,6 +144,11 @@ final class HookInstaller {
     private let ownedFragments = [
         "codex-beacon-native/notify.sh",
         "Codex Beacon.app/Contents/Resources/helper/notify.sh",
+        "codex-beacon/run.sh",
+        "codex-mac-attention"
+    ]
+    private let staleFragments = [
+        "codex-beacon-native/notify.sh",
         "codex-beacon/run.sh",
         "codex-mac-attention"
     ]
@@ -150,9 +168,15 @@ final class HookInstaller {
         guard isRunningFromApplications else {
             return .moveToApplications
         }
+        guard FileManager.default.fileExists(atPath: helperURL.path) else {
+            return .invalid("Helper missing")
+        }
+        guard FileManager.default.isExecutableFile(atPath: helperURL.path) else {
+            return .invalid("Helper not executable")
+        }
         do {
             let root = try readRoot()
-            return hasExpectedHooks(in: root) ? .installed : .missing
+            return hookState(in: root)
         } catch {
             return .invalid(error.localizedDescription)
         }
@@ -240,21 +264,52 @@ final class HookInstaller {
         try FileManager.default.copyItem(at: hooksURL, to: backupURL)
     }
 
-    private func hasExpectedHooks(in root: [String: Any]) -> Bool {
-        guard let hooks = root["hooks"] as? [String: Any] else { return false }
-        return containsHelper(in: hooks["PermissionRequest"], event: "permission_request")
-            && containsHelper(in: hooks["Stop"], event: "turn_done")
+    private func hookState(in root: [String: Any]) -> HookInstallState {
+        guard let hooks = root["hooks"] as? [String: Any] else {
+            return .missing
+        }
+
+        let permissionCount = helperCommandCount(in: hooks["PermissionRequest"], event: "permission_request")
+        let stopCount = helperCommandCount(in: hooks["Stop"], event: "turn_done")
+
+        if hasStaleOwnedHooks(in: hooks) {
+            return .invalid("Old hooks found")
+        }
+        if permissionCount == 1 && stopCount == 1 {
+            return .installed
+        }
+        if permissionCount == 0 && stopCount == 0 {
+            return .missing
+        }
+        return .invalid("Hooks need repair")
     }
 
-    private func containsHelper(in value: Any?, event: String) -> Bool {
-        guard let items = value as? [[String: Any]] else { return false }
-        return items.contains { entry in
-            guard let hooks = entry["hooks"] as? [[String: Any]] else { return false }
-            return hooks.contains { hook in
+    private func helperCommandCount(in value: Any?, event: String) -> Int {
+        guard let items = value as? [[String: Any]] else { return 0 }
+        return items.reduce(0) { count, entry in
+            guard let hooks = entry["hooks"] as? [[String: Any]] else { return count }
+            let matches = hooks.filter { hook in
                 guard let command = hook["command"] as? String else { return false }
                 return command.contains(helperURL.path) && command.contains(event)
             }
+            return count + matches.count
         }
+    }
+
+    private func hasStaleOwnedHooks(in hooks: [String: Any]) -> Bool {
+        for value in hooks.values {
+            guard let items = value as? [[String: Any]] else { continue }
+            for entry in items {
+                guard let hookItems = entry["hooks"] as? [[String: Any]] else { continue }
+                for hook in hookItems {
+                    guard let command = hook["command"] as? String else { continue }
+                    if staleFragments.contains(where: { command.contains($0) }) {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
     }
 
     private func cleanHooks(_ items: [[String: Any]]) -> [[String: Any]] {
@@ -600,7 +655,7 @@ final class SettingsViewController: NSViewController {
         row.translatesAutoresizingMaskIntoConstraints = false
         row.widthAnchor.constraint(equalToConstant: 252).isActive = true
         label.widthAnchor.constraint(equalToConstant: 92).isActive = true
-        hooksButton.widthAnchor.constraint(equalToConstant: 68).isActive = true
+        hooksButton.widthAnchor.constraint(equalToConstant: 76).isActive = true
         return row
     }
 
@@ -609,19 +664,19 @@ final class SettingsViewController: NSViewController {
         switch state {
         case .installed:
             hooksButton.title = "Repair"
-            hooksButton.toolTip = "Hooks installed"
+            hooksButton.toolTip = state.detail
             hooksButton.isEnabled = true
         case .invalid:
             hooksButton.title = "Repair"
-            hooksButton.toolTip = "Hooks need repair"
+            hooksButton.toolTip = state.detail
             hooksButton.isEnabled = true
         case .moveToApplications:
-            hooksButton.title = "Install"
-            hooksButton.toolTip = "Move to Applications first"
-            hooksButton.isEnabled = false
+            hooksButton.title = "Move App"
+            hooksButton.toolTip = state.detail
+            hooksButton.isEnabled = true
         case .missing:
             hooksButton.title = "Install"
-            hooksButton.toolTip = "Hooks not installed"
+            hooksButton.toolTip = state.detail
             hooksButton.isEnabled = state.canInstall
         }
     }
@@ -640,10 +695,10 @@ final class SettingsViewController: NSViewController {
         do {
             try hookInstaller.install()
             refreshHooks()
-            showAlert(title: "Hooks Installed", message: "Restart Codex, then trust the updated hooks.")
+            showAlert(title: "Hooks Ready", message: "Restart Codex and trust hooks.")
         } catch {
             refreshHooks()
-            showAlert(title: "Hooks Failed", message: error.localizedDescription)
+            showAlert(title: "Setup Needed", message: error.localizedDescription)
         }
     }
 
