@@ -11,6 +11,12 @@ APP_DEST="/Applications/$APP_NAME"
 HOOKS_FILE="$HOME/.codex/hooks.json"
 HELPER="$APP_DEST/Contents/Resources/helper/notify.sh"
 
+safe_rm_app_dest() {
+  [[ "$APP_DEST" == "/Applications/Codex Beacon.app" ]] || { echo "Refusing to remove unexpected path: $APP_DEST"; exit 1; }
+  [[ -e "$APP_DEST" || -L "$APP_DEST" ]] || return 0
+  /bin/rm -rf "$APP_DEST"
+}
+
 if [[ "${1:-}" == "--check" ]]; then
   [[ -d "$APP_SOURCE" ]] || { echo "Missing app: $APP_SOURCE"; exit 1; }
   [[ -x "$APP_SOURCE/Contents/Resources/helper/notify.sh" ]] || { echo "Missing helper in app bundle"; exit 1; }
@@ -32,7 +38,7 @@ fi
 [[ -x "$APP_SOURCE/Contents/Resources/helper/notify.sh" ]] || { echo "Missing helper in app bundle"; exit 1; }
 
 /usr/bin/osascript -e 'quit application "Codex Beacon"' >/dev/null 2>&1 || true
-/bin/rm -rf "$APP_DEST"
+safe_rm_app_dest
 /usr/bin/ditto "$APP_SOURCE" "$APP_DEST"
 /bin/chmod +x "$HELPER"
 

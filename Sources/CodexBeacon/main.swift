@@ -400,7 +400,18 @@ struct CodexUsageSnapshot: Codable {
             window = secondary
         }
         guard let window else { return nil }
-        return "\(window.label) \(Int(window.remainingPercent.rounded()))%"
+        return "\(window.label) \(Int(window.remainingPercent.rounded()))% · \(window.resetDisplayText)"
+    }
+}
+
+extension CodexUsageWindow {
+    var resetDisplayText: String {
+        let date = Date(timeIntervalSince1970: TimeInterval(resetsAt))
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = windowMinutes >= 1_440 ? "MMM d" : "HH:mm"
+        return formatter.string(from: date)
     }
 }
 
@@ -625,14 +636,35 @@ final class PresetStore {
     func reload(activePresetName: String) {
         prepareDefaults()
 
-        let fileName = activePresetName.hasSuffix(".json") ? activePresetName : "\(activePresetName).json"
+        guard let fileName = safePresetFileName(activePresetName) else {
+            preset = .default
+            return
+        }
         let fileURL = presetsDirectory.appendingPathComponent(fileName)
+        guard isPresetFile(fileURL) else {
+            preset = .default
+            return
+        }
         guard let data = try? Data(contentsOf: fileURL),
               let nextPreset = try? JSONDecoder().decode(BeaconPreset.self, from: data) else {
             preset = .default
             return
         }
         preset = nextPreset
+    }
+
+    private func safePresetFileName(_ name: String) -> String? {
+        let fileName = name.hasSuffix(".json") ? name : "\(name).json"
+        guard fileName.range(of: #"^[A-Za-z0-9_-]+\.json$"#, options: .regularExpression) != nil else {
+            return nil
+        }
+        return fileName
+    }
+
+    private func isPresetFile(_ url: URL) -> Bool {
+        let base = presetsDirectory.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        return path.hasPrefix(base + "/")
     }
 
     private func prepareDefaults() {
@@ -1082,31 +1114,74 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
         container.wantsLayer = true
         container.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.04).cgColor
 
-        let statusWidth: CGFloat = usageText == nil ? 300 : 150
-        let status = statusView(style: style, width: statusWidth, height: 32, fontSize: 17)
+        let status = usageText.map { unifiedUsageView(style: style, usageText: $0, width: 310, height: 32) }
+            ?? statusView(style: style, width: 300, height: 32, fontSize: 17)
         status.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(status)
 
-        var constraints = [
+        NSLayoutConstraint.activate([
             status.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             status.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            status.widthAnchor.constraint(equalToConstant: statusWidth),
+            status.widthAnchor.constraint(equalToConstant: usageText == nil ? 300 : 310),
             status.heightAnchor.constraint(equalToConstant: 32)
-        ]
+        ])
 
-        if let usageText {
-            let usage = usageView(text: usageText, width: 132, height: 32, fontSize: 16)
-            usage.translatesAutoresizingMaskIntoConstraints = false
-            container.addSubview(usage)
-            constraints.append(contentsOf: [
-                usage.leadingAnchor.constraint(equalTo: status.trailingAnchor, constant: 8),
-                usage.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-                usage.widthAnchor.constraint(equalToConstant: 132),
-                usage.heightAnchor.constraint(equalToConstant: 32)
-            ])
-        }
+        return container
+    }
 
-        NSLayoutConstraint.activate(constraints)
+    private func unifiedUsageView(style: BeaconStateStyle, usageText: String, width: CGFloat, height: CGFloat) -> NSView {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor(calibratedRed: 0.18, green: 0.17, blue: 0.15, alpha: 1.0).cgColor
+        container.layer?.cornerRadius = 10
+        container.toolTip = "Open Codex"
+
+        let button = NSButton(title: "", target: self, action: #selector(openCodex))
+        button.isBordered = false
+        button.bezelStyle = .regularSquare
+        button.setButtonType(.momentaryPushIn)
+        button.wantsLayer = true
+        button.layer?.backgroundColor = NSColor.clear.cgColor
+        button.toolTip = "Open Codex"
+        button.attributedTitle = NSAttributedString(
+            string: style.text,
+            attributes: [
+                .foregroundColor: style.foregroundColor,
+                .font: NSFont.systemFont(ofSize: 16, weight: .semibold)
+            ]
+        )
+        button.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(button)
+
+        let separator = NSView()
+        separator.wantsLayer = true
+        separator.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.18).cgColor
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(separator)
+
+        let usage = NSTextField(labelWithString: usageText)
+        usage.alignment = .right
+        usage.lineBreakMode = .byTruncatingTail
+        usage.textColor = NSColor.white.withAlphaComponent(0.86)
+        usage.font = NSFont.monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
+        usage.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(usage)
+
+        NSLayoutConstraint.activate([
+            button.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            button.topAnchor.constraint(equalTo: container.topAnchor),
+            button.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            button.widthAnchor.constraint(equalToConstant: 118),
+
+            separator.leadingAnchor.constraint(equalTo: button.trailingAnchor, constant: 2),
+            separator.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            separator.widthAnchor.constraint(equalToConstant: 1),
+            separator.heightAnchor.constraint(equalToConstant: 18),
+
+            usage.leadingAnchor.constraint(equalTo: separator.trailingAnchor, constant: 12),
+            usage.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
+            usage.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+        ])
 
         return container
     }
@@ -1141,29 +1216,6 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
             button.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             button.topAnchor.constraint(equalTo: container.topAnchor),
             button.bottomAnchor.constraint(equalTo: container.bottomAnchor)
-        ])
-
-        return container
-    }
-
-    private func usageView(text: String, width: CGFloat, height: CGFloat, fontSize: CGFloat) -> NSView {
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
-        container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor(calibratedRed: 0.15, green: 0.16, blue: 0.17, alpha: 1.0).cgColor
-        container.layer?.cornerRadius = 9
-        container.toolTip = "Codex usage"
-
-        let label = NSTextField(labelWithString: text)
-        label.alignment = .center
-        label.textColor = .white
-        label.font = NSFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .semibold)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(label)
-
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
-            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
-            label.centerYAnchor.constraint(equalTo: container.centerYAnchor)
         ])
 
         return container

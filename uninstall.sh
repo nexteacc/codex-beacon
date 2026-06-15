@@ -10,6 +10,18 @@ if [[ "${1:-}" == "--remove-data" ]]; then
   REMOVE_DATA=true
 fi
 
+safe_rm_app_dest() {
+  [[ "$APP_DEST" == "/Applications/Codex Beacon.app" ]] || { echo "Refusing to remove unexpected path: $APP_DEST"; exit 1; }
+  [[ -e "$APP_DEST" || -L "$APP_DEST" ]] || return 0
+  /bin/rm -rf "$APP_DEST"
+}
+
+safe_rm_data_dir() {
+  [[ "$DATA_DIR" == "$HOME/Library/Application Support/Codex Beacon" ]] || { echo "Refusing to remove unexpected path: $DATA_DIR"; exit 1; }
+  [[ -e "$DATA_DIR" || -L "$DATA_DIR" ]] || return 0
+  /bin/rm -rf "$DATA_DIR"
+}
+
 /usr/bin/osascript -e 'quit application "Codex Beacon"' >/dev/null 2>&1 || true
 
 if [[ -f "$HOOKS_FILE" ]]; then
@@ -69,10 +81,10 @@ writeText(hooksPath, JSON.stringify(root, null, 2) + "\n");
 JXA
 fi
 
-/bin/rm -rf "$APP_DEST"
+safe_rm_app_dest
 
 if [[ "$REMOVE_DATA" == true ]]; then
-  /bin/rm -rf "$DATA_DIR"
+  safe_rm_data_dir
 fi
 
 echo "Uninstalled Codex Beacon."
