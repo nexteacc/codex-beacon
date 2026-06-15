@@ -5,3 +5,4 @@ DerivedData/
 dist/
 .dmg-stage/
 .DS_Store
+.claude/

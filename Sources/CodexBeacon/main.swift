@@ -8,12 +8,28 @@ struct BeaconConfig: Codable, Equatable {
     var sound: Bool
     var activePreset: String?
     var authToken: String?
+    var usageWindow: UsageWindowSelection?
 
-    static let `default` = BeaconConfig(touchBarVisual: true, sound: true, activePreset: "default", authToken: nil)
+    static let `default` = BeaconConfig(
+        touchBarVisual: true,
+        sound: true,
+        activePreset: "default",
+        authToken: nil,
+        usageWindow: .fiveHour
+    )
 
     var presetName: String {
         activePreset?.isEmpty == false ? activePreset! : "default"
     }
+
+    var selectedUsageWindow: UsageWindowSelection {
+        usageWindow ?? .fiveHour
+    }
+}
+
+enum UsageWindowSelection: String, Codable, Equatable, CaseIterable {
+    case fiveHour
+    case weekly
 }
 
 final class ConfigStore {
@@ -60,6 +76,11 @@ final class ConfigStore {
 
     func setSound(_ enabled: Bool) {
         config.sound = enabled
+        try? save()
+    }
+
+    func setUsageWindow(_ selection: UsageWindowSelection) {
+        config.usageWindow = selection
         try? save()
     }
 
@@ -353,6 +374,188 @@ struct BeaconEvent {
     let returnTarget: BeaconReturnTarget
 }
 
+struct CodexUsageWindow: Codable {
+    let label: String
+    let usedPercent: Double
+    let remainingPercent: Double
+    let windowMinutes: Int
+    let resetsAt: Int
+    let resetsAtLocal: String
+    let resetInSeconds: Int
+}
+
+struct CodexUsageSnapshot: Codable {
+    let ok: Bool
+    let updatedAt: String
+    let planType: String?
+    let primary: CodexUsageWindow
+    let secondary: CodexUsageWindow?
+
+    func displayText(for selection: UsageWindowSelection) -> String? {
+        let window: CodexUsageWindow?
+        switch selection {
+        case .fiveHour:
+            window = primary
+        case .weekly:
+            window = secondary
+        }
+        guard let window else { return nil }
+        return "\(window.label) \(Int(window.remainingPercent.rounded()))%"
+    }
+}
+
+final class CodexUsageReader {
+    private let sessionsDirectory: URL
+    private let maxFiles = 24
+    private let maxTailBytes: UInt64 = 1_048_576
+
+    init() {
+        sessionsDirectory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/sessions", isDirectory: true)
+    }
+
+    func latestSnapshot() -> CodexUsageSnapshot? {
+        for fileURL in recentSessionFiles() {
+            guard let line = latestRateLimitLine(in: fileURL),
+                  let snapshot = snapshot(from: line) else {
+                continue
+            }
+            return snapshot
+        }
+        return nil
+    }
+
+    private func recentSessionFiles() -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: sessionsDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        var files: [(url: URL, modifiedAt: Date)] = []
+        for case let fileURL as URL in enumerator where fileURL.pathExtension == "jsonl" {
+            guard let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
+                  values.isRegularFile == true else {
+                continue
+            }
+            files.append((fileURL, values.contentModificationDate ?? .distantPast))
+        }
+
+        return files
+            .sorted { $0.modifiedAt > $1.modifiedAt }
+            .prefix(maxFiles)
+            .map(\.url)
+    }
+
+    private func latestRateLimitLine(in fileURL: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: fileURL) else {
+            return nil
+        }
+        defer {
+            try? handle.close()
+        }
+
+        do {
+            let size = try handle.seekToEnd()
+            let offset = size > maxTailBytes ? size - maxTailBytes : 0
+            try handle.seek(toOffset: offset)
+            let data = try handle.readToEnd() ?? Data()
+            let text = String(decoding: data, as: UTF8.self)
+            return text
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .reversed()
+                .first { $0.contains(#""rate_limits""#) }
+                .map(String.init)
+        } catch {
+            return nil
+        }
+    }
+
+    private func snapshot(from line: String) -> CodexUsageSnapshot? {
+        guard let data = line.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let payload = root["payload"] as? [String: Any],
+              let rateLimits = payload["rate_limits"] as? [String: Any],
+              let primaryObject = rateLimits["primary"] as? [String: Any],
+              let primary = window(from: primaryObject, fallbackLabel: "5h") else {
+            return nil
+        }
+
+        let secondary = (rateLimits["secondary"] as? [String: Any]).flatMap {
+            window(from: $0, fallbackLabel: "Weekly")
+        }
+        let updatedAt = root["timestamp"] as? String ?? isoString(Date())
+
+        return CodexUsageSnapshot(
+            ok: true,
+            updatedAt: updatedAt,
+            planType: rateLimits["plan_type"] as? String,
+            primary: primary,
+            secondary: secondary
+        )
+    }
+
+    private func window(from object: [String: Any], fallbackLabel: String) -> CodexUsageWindow? {
+        guard let usedPercent = doubleValue(object["used_percent"]),
+              let windowMinutes = intValue(object["window_minutes"]),
+              let resetsAt = intValue(object["resets_at"]) else {
+            return nil
+        }
+
+        let remainingPercent = max(0, min(100, 100 - usedPercent))
+        let resetDate = Date(timeIntervalSince1970: TimeInterval(resetsAt))
+        let resetInSeconds = max(0, Int(resetDate.timeIntervalSinceNow.rounded()))
+        return CodexUsageWindow(
+            label: label(forWindowMinutes: windowMinutes, fallback: fallbackLabel),
+            usedPercent: usedPercent,
+            remainingPercent: remainingPercent,
+            windowMinutes: windowMinutes,
+            resetsAt: resetsAt,
+            resetsAtLocal: isoString(resetDate),
+            resetInSeconds: resetInSeconds
+        )
+    }
+
+    private func label(forWindowMinutes minutes: Int, fallback: String) -> String {
+        if minutes == 300 {
+            return "5h"
+        }
+        if minutes == 10_080 {
+            return "Weekly"
+        }
+        if minutes % 1_440 == 0 {
+            return "\(minutes / 1_440)d"
+        }
+        if minutes % 60 == 0 {
+            return "\(minutes / 60)h"
+        }
+        return fallback
+    }
+
+    private func doubleValue(_ value: Any?) -> Double? {
+        if let value = value as? Double { return value }
+        if let value = value as? Int { return Double(value) }
+        if let value = value as? String { return Double(value) }
+        return nil
+    }
+
+    private func intValue(_ value: Any?) -> Int? {
+        if let value = value as? Int { return value }
+        if let value = value as? Double { return Int(value) }
+        if let value = value as? String { return Int(value) }
+        return nil
+    }
+
+    private func isoString(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = .current
+        return formatter.string(from: date)
+    }
+}
+
 struct BeaconStateStyle: Codable, Equatable {
     var text: String
     var menuIcon: String?
@@ -555,6 +758,7 @@ final class SettingsViewController: NSViewController {
     private let onChange: () -> Void
     private let touchBarSwitch = BeaconToggle()
     private let soundSwitch = BeaconToggle()
+    private let usageControl = NSSegmentedControl(labels: ["5h", "Weekly"], trackingMode: .selectOne, target: nil, action: nil)
     private let hooksButton = NSButton(title: "Install Hooks", target: nil, action: nil)
     private let serverDot = StatusDotView()
     private var isServerReady = false
@@ -572,15 +776,21 @@ final class SettingsViewController: NSViewController {
     }
 
     override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 142))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 176))
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
         let touchBarRow = row(title: "Touch Bar", control: touchBarSwitch)
         let soundRow = row(title: "Sound", control: soundSwitch)
+        let usageRow = row(title: "Usage", control: usageControl)
         let hooksRow = hookRow()
 
-        let stack = NSStackView(views: [touchBarRow, soundRow, hooksRow])
+        usageControl.segmentStyle = .rounded
+        usageControl.controlSize = .small
+        usageControl.setWidth(56, forSegment: 0)
+        usageControl.setWidth(78, forSegment: 1)
+
+        let stack = NSStackView(views: [touchBarRow, soundRow, usageRow, hooksRow])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 13
@@ -604,6 +814,8 @@ final class SettingsViewController: NSViewController {
         touchBarSwitch.action = #selector(touchBarChanged)
         soundSwitch.target = self
         soundSwitch.action = #selector(soundChanged)
+        usageControl.target = self
+        usageControl.action = #selector(usageChanged)
         hooksButton.target = self
         hooksButton.action = #selector(installHooks)
 
@@ -614,6 +826,7 @@ final class SettingsViewController: NSViewController {
     func refresh() {
         touchBarSwitch.isOn = configStore.config.touchBarVisual
         soundSwitch.isOn = configStore.config.sound
+        usageControl.selectedSegment = configStore.config.selectedUsageWindow == .fiveHour ? 0 : 1
         serverDot.setColor(isServerReady ? .systemGreen : .systemRed, tooltip: isServerReady ? "Ready" : "Port busy")
         refreshHooks()
     }
@@ -691,6 +904,12 @@ final class SettingsViewController: NSViewController {
         onChange()
     }
 
+    @objc private func usageChanged() {
+        let selection: UsageWindowSelection = usageControl.selectedSegment == 1 ? .weekly : .fiveHour
+        configStore.setUsageWindow(selection)
+        onChange()
+    }
+
     @objc private func installHooks() {
         do {
             try hookInstaller.install()
@@ -723,6 +942,7 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
     private let modalItem: NSCustomTouchBarItem
     private let modalTouchBar: NSTouchBar
     private var style = BeaconPreset.default.style(for: .idle)
+    private var usageText: String?
     private var installed = false
     private let onTap: () -> Void
 
@@ -768,6 +988,11 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
         updateViews()
     }
 
+    func setUsageText(_ text: String?) {
+        usageText = text
+        updateViews()
+    }
+
     func present() {
         let touchBarClass: AnyObject = NSTouchBar.self
         let placementSelector = NSSelectorFromString("presentSystemModalTouchBar:placement:systemTrayItemIdentifier:")
@@ -808,7 +1033,7 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
 
     private func updateViews() {
         trayItem.view = statusView(style: style, width: 120, height: 30, fontSize: 13)
-        modalItem.view = fullTouchBarView(style: style)
+        modalItem.view = fullTouchBarView(style: style, usageText: usageText)
     }
 
     private func callSystemModalPlacement(selector: Selector) -> Bool {
@@ -852,21 +1077,36 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
         return dlsym(handle, name)
     }
 
-    private func fullTouchBarView(style: BeaconStateStyle) -> NSView {
+    private func fullTouchBarView(style: BeaconStateStyle, usageText: String?) -> NSView {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 980, height: 36))
         container.wantsLayer = true
         container.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.04).cgColor
 
-        let status = statusView(style: style, width: 300, height: 32, fontSize: 17)
+        let statusWidth: CGFloat = usageText == nil ? 300 : 150
+        let status = statusView(style: style, width: statusWidth, height: 32, fontSize: 17)
         status.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(status)
 
-        NSLayoutConstraint.activate([
+        var constraints = [
             status.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             status.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            status.widthAnchor.constraint(equalToConstant: 300),
+            status.widthAnchor.constraint(equalToConstant: statusWidth),
             status.heightAnchor.constraint(equalToConstant: 32)
-        ])
+        ]
+
+        if let usageText {
+            let usage = usageView(text: usageText, width: 132, height: 32, fontSize: 16)
+            usage.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(usage)
+            constraints.append(contentsOf: [
+                usage.leadingAnchor.constraint(equalTo: status.trailingAnchor, constant: 8),
+                usage.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+                usage.widthAnchor.constraint(equalToConstant: 132),
+                usage.heightAnchor.constraint(equalToConstant: 32)
+            ])
+        }
+
+        NSLayoutConstraint.activate(constraints)
 
         return container
     }
@@ -906,6 +1146,29 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
         return container
     }
 
+    private func usageView(text: String, width: CGFloat, height: CGFloat, fontSize: CGFloat) -> NSView {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor(calibratedRed: 0.15, green: 0.16, blue: 0.17, alpha: 1.0).cgColor
+        container.layer?.cornerRadius = 9
+        container.toolTip = "Codex usage"
+
+        let label = NSTextField(labelWithString: text)
+        label.alignment = .center
+        label.textColor = .white
+        label.font = NSFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .semibold)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+            label.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+        ])
+
+        return container
+    }
+
     @objc private func openCodex() {
         NSLog("Codex Beacon Touch Bar item tapped")
         onTap()
@@ -915,9 +1178,15 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
 final class BeaconServer {
     private let listener: NWListener
     private let tokenProvider: () -> String?
+    private let usageProvider: () -> CodexUsageSnapshot?
     private let onEvent: (BeaconEvent) -> Void
 
-    init(port: UInt16, tokenProvider: @escaping () -> String?, onEvent: @escaping (BeaconEvent) -> Void) throws {
+    init(
+        port: UInt16,
+        tokenProvider: @escaping () -> String?,
+        usageProvider: @escaping () -> CodexUsageSnapshot?,
+        onEvent: @escaping (BeaconEvent) -> Void
+    ) throws {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(
             host: .ipv4(IPv4Address("127.0.0.1")!),
@@ -925,6 +1194,7 @@ final class BeaconServer {
         )
         listener = try NWListener(using: parameters)
         self.tokenProvider = tokenProvider
+        self.usageProvider = usageProvider
         self.onEvent = onEvent
     }
 
@@ -945,7 +1215,9 @@ final class BeaconServer {
 
             let request = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
             let response: String
-            if let event = self.event(from: request) {
+            if let usageResponse = self.usage(from: request) {
+                response = usageResponse
+            } else if let event = self.event(from: request) {
                 DispatchQueue.main.async {
                     self.onEvent(event)
                 }
@@ -960,28 +1232,35 @@ final class BeaconServer {
         }
     }
 
+    private func usage(from request: String) -> String? {
+        guard let query = query(from: request, matchingPath: "/usage") else {
+            return nil
+        }
+
+        guard isAuthorized(query) else {
+            return Self.response(
+                status: "401 Unauthorized",
+                contentType: "application/json",
+                body: #"{"ok":false,"error":"unauthorized"}"# + "\n"
+            )
+        }
+
+        guard let snapshot = usageProvider(),
+              let data = try? JSONEncoder().encode(snapshot),
+              let body = String(data: data, encoding: .utf8) else {
+            return Self.response(
+                status: "503 Service Unavailable",
+                contentType: "application/json",
+                body: #"{"ok":false,"error":"usage unavailable"}"# + "\n"
+            )
+        }
+
+        return Self.response(status: "200 OK", contentType: "application/json", body: body + "\n")
+    }
+
     private func event(from request: String) -> BeaconEvent? {
-        guard let requestLine = request.components(separatedBy: "\r\n").first,
-              requestLine.hasPrefix("GET /event?") else {
-            return nil
-        }
-
-        let parts = requestLine.split(separator: " ")
-        guard parts.count >= 2,
-              let url = URL(string: "http://127.0.0.1\(parts[1])"),
-              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
-            return nil
-        }
-
-        var query: [String: String] = [:]
-        for item in components.queryItems ?? [] {
-            if query[item.name] == nil {
-                query[item.name] = item.value
-            }
-        }
-
-        guard let expectedToken = tokenProvider(),
-              query["token"] == expectedToken else {
+        guard let query = query(from: request, matchingPath: "/event"),
+              isAuthorized(query) else {
             return nil
         }
 
@@ -1003,6 +1282,34 @@ final class BeaconServer {
         )
     }
 
+    private func query(from request: String, matchingPath path: String) -> [String: String]? {
+        guard let requestLine = request.components(separatedBy: "\r\n").first,
+              requestLine.hasPrefix("GET ") else {
+            return nil
+        }
+
+        let parts = requestLine.split(separator: " ")
+        guard parts.count >= 2,
+              let url = URL(string: "http://127.0.0.1\(parts[1])"),
+              url.path == path,
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+
+        var query: [String: String] = [:]
+        for item in components.queryItems ?? [] where query[item.name] == nil {
+            query[item.name] = item.value
+        }
+        return query
+    }
+
+    private func isAuthorized(_ query: [String: String]) -> Bool {
+        guard let expectedToken = tokenProvider() else {
+            return false
+        }
+        return query["token"] == expectedToken
+    }
+
     private func sanitizedProcessIdentifier(_ value: String?) -> pid_t? {
         guard let value,
               let identifier = Int32(value),
@@ -1022,10 +1329,10 @@ final class BeaconServer {
         return value
     }
 
-    private static func response(status: String, body: String) -> String {
+    private static func response(status: String, contentType: String = "text/plain", body: String) -> String {
         """
         HTTP/1.1 \(status)\r
-        Content-Type: text/plain\r
+        Content-Type: \(contentType)\r
         Content-Length: \(body.utf8.count)\r
         Connection: close\r
         \r
@@ -1037,6 +1344,7 @@ final class BeaconServer {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let configStore = ConfigStore()
     private let hookInstaller = HookInstaller()
+    private let usageReader = CodexUsageReader()
     private lazy var presetStore = PresetStore(appSupportDirectory: configStore.directoryURL)
     private lazy var touchBarBeacon = TouchBarBeacon { [weak self] in
         self?.activateCodex()
@@ -1045,10 +1353,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
     private var server: BeaconServer?
     private var resetWorkItem: DispatchWorkItem?
+    private var usageTimer: Timer?
     private var statusItem: NSStatusItem?
     private var touchBarMenuItem: NSMenuItem?
     private var soundMenuItem: NSMenuItem?
     private var isServerReady = false
+    private var currentState: BeaconState = .idle
     private var returnTarget = BeaconReturnTarget(processIdentifier: nil, bundleIdentifier: nil)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1057,6 +1367,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupServer()
         touchBarBeacon.install()
         applyConfig()
+        setupUsageRefresh()
         showSettings()
     }
 
@@ -1072,7 +1383,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsController = controller
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 340, height: 218),
+            contentRect: NSRect(x: 0, y: 0, width: 340, height: 252),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -1110,6 +1421,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             server = try BeaconServer(port: 17321, tokenProvider: { [weak self] in
                 self?.configStore.reload()
                 return self?.configStore.config.authToken
+            }, usageProvider: { [weak self] in
+                self?.usageReader.latestSnapshot()
             }) { [weak self] event in
                 self?.display(event)
             }
@@ -1128,9 +1441,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         presetStore.reload(activePresetName: configStore.config.presetName)
         settingsController?.refresh()
         refreshMenu()
-        touchBarBeacon.setStyle(presetStore.preset.style(for: .idle))
+        let idleStyle = presetStore.preset.style(for: .idle)
+        touchBarBeacon.setStyle(idleStyle)
+        refreshUsageDisplay()
         touchBarBeacon.setEnabled(configStore.config.touchBarVisual)
-        statusItem?.button?.title = presetStore.preset.style(for: .idle).resolvedMenuIcon
+        statusItem?.button?.title = idleStyle.resolvedMenuIcon
     }
 
     private func refreshMenu() {
@@ -1145,7 +1460,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshMenu()
         resetWorkItem?.cancel()
         let state = event.state
+        currentState = state
         let style = presetStore.preset.style(for: state)
+        touchBarBeacon.setUsageText(nil)
 
         if configStore.config.touchBarVisual {
             touchBarBeacon.setStyle(style)
@@ -1162,8 +1479,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.configStore.reload()
             self.presetStore.reload(activePresetName: self.configStore.config.presetName)
+            self.currentState = .idle
             let idleStyle = self.presetStore.preset.style(for: .idle)
             self.touchBarBeacon.setStyle(idleStyle)
+            self.refreshUsageDisplay()
             if self.configStore.config.touchBarVisual {
                 self.touchBarBeacon.present()
             }
@@ -1171,6 +1490,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         resetWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: workItem)
+    }
+
+    private func setupUsageRefresh() {
+        usageTimer?.invalidate()
+        refreshUsageDisplay()
+        usageTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.refreshUsageDisplay()
+        }
+    }
+
+    private func refreshUsageDisplay() {
+        configStore.reload()
+        guard currentState == .idle,
+              let usageText = usageReader.latestSnapshot()?.displayText(for: configStore.config.selectedUsageWindow) else {
+            if currentState == .idle {
+                touchBarBeacon.setUsageText(nil)
+            }
+            return
+        }
+        touchBarBeacon.setUsageText(usageText)
     }
 
     @objc private func showSettings() {
@@ -1278,6 +1617,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func quit() {
+        usageTimer?.invalidate()
         touchBarBeacon.minimize()
         NSApp.terminate(nil)
     }
