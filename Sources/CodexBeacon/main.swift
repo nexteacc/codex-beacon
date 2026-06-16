@@ -480,8 +480,16 @@ extension CodexUsageWindow {
 
 final class CodexUsageReader {
     private let sessionsDirectory: URL
-    private let maxFiles = 24
+    private let scanLimits = [8, 24, 64]
     private let maxTailBytes: UInt64 = 1_048_576
+    private var lastMatchedFileURL: URL?
+
+    private struct UsageCandidate {
+        let snapshot: CodexUsageSnapshot
+        let timestamp: Date
+        let modifiedAt: Date
+        let fileURL: URL
+    }
 
     init() {
         sessionsDirectory = FileManager.default.homeDirectoryForCurrentUser
@@ -489,17 +497,43 @@ final class CodexUsageReader {
     }
 
     func latestSnapshot() -> CodexUsageSnapshot? {
-        for fileURL in recentSessionFiles() {
-            guard let line = latestRateLimitLine(in: fileURL),
-                  let snapshot = snapshot(from: line) else {
+        var candidates: [UsageCandidate] = []
+        var scanned = Set<URL>()
+        let files = recentSessionFiles()
+
+        if let cachedFileURL = lastMatchedFileURL,
+           let candidate = usageCandidate(from: cachedFileURL, modifiedAt: fileModifiedAt(cachedFileURL)) {
+            candidates.append(candidate)
+            scanned.insert(cachedFileURL)
+        }
+
+        for limit in scanLimits {
+            let batch = Array(files.prefix(limit))
+            for file in batch where !scanned.contains(file.url) {
+                if let candidate = usageCandidate(from: file.url, modifiedAt: file.modifiedAt) {
+                    candidates.append(candidate)
+                }
+                scanned.insert(file.url)
+            }
+
+            guard let best = newestCandidate(candidates) else {
                 continue
             }
-            return snapshot
+            if canStopScanning(best: best, scannedBatch: batch) || limit == scanLimits.last {
+                lastMatchedFileURL = best.fileURL
+                return best.snapshot
+            }
         }
-        return nil
+
+        guard let best = newestCandidate(candidates) else {
+            lastMatchedFileURL = nil
+            return nil
+        }
+        lastMatchedFileURL = best.fileURL
+        return best.snapshot
     }
 
-    private func recentSessionFiles() -> [URL] {
+    private func recentSessionFiles() -> [(url: URL, modifiedAt: Date)] {
         guard let enumerator = FileManager.default.enumerator(
             at: sessionsDirectory,
             includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
@@ -517,13 +551,26 @@ final class CodexUsageReader {
             files.append((fileURL, values.contentModificationDate ?? .distantPast))
         }
 
-        return files
+        return Array(files
             .sorted { $0.modifiedAt > $1.modifiedAt }
-            .prefix(maxFiles)
-            .map(\.url)
+            .prefix(scanLimits.last ?? 64))
     }
 
-    private func latestRateLimitLine(in fileURL: URL) -> String? {
+    private func usageCandidate(from fileURL: URL, modifiedAt: Date) -> UsageCandidate? {
+        guard let line = latestTokenCountRateLimitLine(in: fileURL),
+              let snapshot = snapshot(from: line) else {
+            return nil
+        }
+
+        return UsageCandidate(
+            snapshot: snapshot,
+            timestamp: dateValue(snapshot.updatedAt) ?? .distantPast,
+            modifiedAt: modifiedAt,
+            fileURL: fileURL
+        )
+    }
+
+    private func latestTokenCountRateLimitLine(in fileURL: URL) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: fileURL) else {
             return nil
         }
@@ -540,7 +587,7 @@ final class CodexUsageReader {
             return text
                 .split(separator: "\n", omittingEmptySubsequences: true)
                 .reversed()
-                .first { $0.contains(#""rate_limits""#) }
+                .first { $0.contains(#""token_count""#) && $0.contains(#""rate_limits""#) }
                 .map(String.init)
         } catch {
             return nil
@@ -550,8 +597,10 @@ final class CodexUsageReader {
     private func snapshot(from line: String) -> CodexUsageSnapshot? {
         guard let data = line.data(using: .utf8),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              root["type"] as? String == "event_msg",
               let payload = root["payload"] as? [String: Any],
-              let rateLimits = payload["rate_limits"] as? [String: Any],
+              payload["type"] as? String == "token_count",
+              let rateLimits = rateLimits(from: root),
               let primaryObject = rateLimits["primary"] as? [String: Any],
               let primary = window(from: primaryObject, fallbackLabel: "5h") else {
             return nil
@@ -570,6 +619,37 @@ final class CodexUsageReader {
             primary: primary,
             secondary: secondary
         )
+    }
+
+    private func rateLimits(from root: [String: Any]) -> [String: Any]? {
+        if let payload = root["payload"] as? [String: Any],
+           let rateLimits = payload["rate_limits"] as? [String: Any] {
+            return rateLimits
+        }
+        return root["rate_limits"] as? [String: Any]
+    }
+
+    private func newestCandidate(_ candidates: [UsageCandidate]) -> UsageCandidate? {
+        candidates.sorted {
+            if $0.timestamp == $1.timestamp {
+                return $0.modifiedAt > $1.modifiedAt
+            }
+            return $0.timestamp > $1.timestamp
+        }.first
+    }
+
+    private func canStopScanning(best: UsageCandidate, scannedBatch: [(url: URL, modifiedAt: Date)]) -> Bool {
+        guard let oldestScannedModification = scannedBatch.map(\.modifiedAt).min() else {
+            return false
+        }
+        return best.timestamp >= oldestScannedModification
+    }
+
+    private func fileModifiedAt(_ fileURL: URL) -> Date {
+        guard let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]) else {
+            return .distantPast
+        }
+        return values.contentModificationDate ?? .distantPast
     }
 
     private func window(from object: [String: Any], fallbackLabel: String) -> CodexUsageWindow? {
@@ -628,6 +708,17 @@ final class CodexUsageReader {
             return nil
         }
         return value
+    }
+
+    private func dateValue(_ value: String) -> Date? {
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = isoFormatter.date(from: value) {
+            return date
+        }
+
+        isoFormatter.formatOptions = [.withInternetDateTime]
+        return isoFormatter.date(from: value)
     }
 
     private func isoString(_ date: Date) -> String {
@@ -1586,6 +1677,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        refreshUsageDisplay()
+    }
+
     private func setupWindow() {
         let controller = SettingsViewController(configStore: configStore, hookInstaller: hookInstaller, isServerReady: isServerReady) { [weak self] in
             self?.applyConfig()
@@ -1705,7 +1800,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupUsageRefresh() {
         usageTimer?.invalidate()
         refreshUsageDisplay()
-        usageTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+        usageTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
             self?.refreshUsageDisplay()
         }
     }
@@ -1799,8 +1894,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             setupWindow()
         }
 
+        refreshUsageDisplay()
         revealSettingsWindow()
         DispatchQueue.main.async { [weak self] in
+            self?.refreshUsageDisplay()
             self?.revealSettingsWindow()
         }
     }
