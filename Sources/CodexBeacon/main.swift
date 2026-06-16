@@ -673,22 +673,22 @@ struct BeaconPreset: Codable, Equatable {
             BeaconState.idle.rawValue: BeaconStateStyle(
                 text: "☕ Codex",
                 menuIcon: "☕",
-                background: "#4A3021",
-                foreground: "#FFFFFF",
+                background: "#2A211B",
+                foreground: "#F3EDE4",
                 sound: nil
             ),
             BeaconState.needsYou.rawValue: BeaconStateStyle(
                 text: "🫶 Needs You",
                 menuIcon: "🫶",
-                background: "#B03646",
-                foreground: "#FFFFFF",
+                background: "#9F4A3F",
+                foreground: "#FFF7F2",
                 sound: "Submarine"
             ),
             BeaconState.done.rawValue: BeaconStateStyle(
                 text: "❤️ Done",
                 menuIcon: "❤️",
-                background: "#3F8F68",
-                foreground: "#FFFFFF",
+                background: "#2A211B",
+                foreground: "#D7A85B",
                 sound: "Ping"
             )
         ]
@@ -1211,11 +1211,11 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
         container.wantsLayer = true
         let background: NSColor
         if usageDisplay.isLimited {
-            background = NSColor(calibratedRed: 0.28, green: 0.10, blue: 0.10, alpha: 1.0)
+            background = NSColor(calibratedRed: 0.165, green: 0.129, blue: 0.106, alpha: 1.0)
         } else if usageDisplay.isReady {
-            background = NSColor(calibratedRed: 0.11, green: 0.23, blue: 0.16, alpha: 1.0)
+            background = NSColor(calibratedRed: 0.165, green: 0.129, blue: 0.106, alpha: 1.0)
         } else {
-            background = NSColor(calibratedRed: 0.18, green: 0.17, blue: 0.15, alpha: 1.0)
+            background = NSColor(calibratedRed: 0.165, green: 0.129, blue: 0.106, alpha: 1.0)
         }
         container.layer?.backgroundColor = background.cgColor
         container.layer?.cornerRadius = 10
@@ -1293,29 +1293,29 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
 
     private func usageBorderColor(for display: CodexUsageDisplay) -> NSColor {
         if display.isLimited {
-            return NSColor(calibratedRed: 0.78, green: 0.24, blue: 0.24, alpha: 0.55)
+            return NSColor(calibratedRed: 0.851, green: 0.541, blue: 0.404, alpha: 0.45)
         }
         if display.isReady {
-            return NSColor(calibratedRed: 0.31, green: 0.76, blue: 0.47, alpha: 0.50)
+            return NSColor(calibratedRed: 0.843, green: 0.659, blue: 0.357, alpha: 0.38)
         }
         return NSColor.clear
     }
 
     private func usagePulseColor(for display: CodexUsageDisplay) -> NSColor {
         if display.isReady {
-            return NSColor(calibratedRed: 0.16, green: 0.36, blue: 0.24, alpha: 1.0)
+            return NSColor(calibratedRed: 0.227, green: 0.188, blue: 0.133, alpha: 1.0)
         }
-        return NSColor(calibratedRed: 0.44, green: 0.13, blue: 0.12, alpha: 1.0)
+        return NSColor(calibratedRed: 0.227, green: 0.161, blue: 0.145, alpha: 1.0)
     }
 
     private func usageTextColor(for display: CodexUsageDisplay) -> NSColor {
         if display.isLimited {
-            return NSColor(calibratedRed: 1.0, green: 0.84, blue: 0.78, alpha: 0.95)
+            return NSColor(calibratedRed: 0.851, green: 0.541, blue: 0.404, alpha: 0.95)
         }
         if display.isReady {
-            return NSColor(calibratedRed: 0.82, green: 1.0, blue: 0.88, alpha: 0.95)
+            return NSColor(calibratedRed: 0.843, green: 0.659, blue: 0.357, alpha: 0.95)
         }
-        return NSColor.white.withAlphaComponent(0.86)
+        return NSColor(calibratedRed: 0.953, green: 0.929, blue: 0.894, alpha: 0.90)
     }
 
     private func addUsagePulse(to layer: CALayer?, from background: NSColor, to highlight: NSColor) {

@@ -4,22 +4,22 @@
     "idle": {
       "text": "☕ Codex",
       "menuIcon": "☕",
-      "background": "#4A3021",
-      "foreground": "#FFFFFF",
+      "background": "#2A211B",
+      "foreground": "#F3EDE4",
       "sound": null
     },
     "needsYou": {
       "text": "🫶 Needs You",
       "menuIcon": "🫶",
-      "background": "#B03646",
-      "foreground": "#FFFFFF",
+      "background": "#9F4A3F",
+      "foreground": "#FFF7F2",
       "sound": "Submarine"
     },
     "done": {
       "text": "❤️ Done",
       "menuIcon": "❤️",
-      "background": "#3F8F68",
-      "foreground": "#FFFFFF",
+      "background": "#2A211B",
+      "foreground": "#D7A85B",
       "sound": "Ping"
     }
   }
