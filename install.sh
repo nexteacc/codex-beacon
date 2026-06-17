@@ -8,6 +8,9 @@ if [[ ! -d "$APP_SOURCE" ]]; then
   APP_SOURCE="$ROOT/$APP_NAME"
 fi
 APP_DEST="/Applications/$APP_NAME"
+WIDGET_DEST="$APP_DEST/Contents/PlugIns/CodexBeaconWidget.appex"
+WIDGET_SOURCE="$APP_SOURCE/Contents/PlugIns/CodexBeaconWidget.appex"
+WIDGET_ID="com.codexbeacon.native.widget"
 HOOKS_FILE="$HOME/.codex/hooks.json"
 HELPER="$APP_DEST/Contents/Resources/helper/notify.sh"
 
@@ -41,6 +44,15 @@ fi
 safe_rm_app_dest
 /usr/bin/ditto "$APP_SOURCE" "$APP_DEST"
 /bin/chmod +x "$HELPER"
+
+if [[ -d "$WIDGET_DEST" ]]; then
+  if [[ -d "$WIDGET_SOURCE" && "$WIDGET_SOURCE" != "$WIDGET_DEST" ]]; then
+    /usr/bin/pluginkit -r "$WIDGET_SOURCE" >/dev/null 2>&1 || true
+  fi
+  /usr/bin/pluginkit -a "$WIDGET_DEST" >/dev/null 2>&1 || true
+  /usr/bin/pluginkit -e use -i "$WIDGET_ID" >/dev/null 2>&1 || true
+  /usr/bin/killall chronod >/dev/null 2>&1 || true
+fi
 
 /bin/mkdir -p "$HOME/.codex"
 if [[ -f "$HOOKS_FILE" ]]; then

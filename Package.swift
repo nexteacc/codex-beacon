@@ -15,7 +15,8 @@ let package = Package(
             name: "CodexBeacon",
             linkerSettings: [
                 .linkedFramework("AppKit"),
-                .linkedFramework("Network")
+                .linkedFramework("Network"),
+                .linkedFramework("WidgetKit")
             ]
         )
     ]

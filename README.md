@@ -1,6 +1,6 @@
 # Codex Beacon
 
-Codex Beacon is a small macOS menu bar app that gives Codex a local attention surface: Touch Bar status, sounds, and Codex usage signals.
+Codex Beacon is a small local-first macOS menu bar app for Codex signals: Touch Bar status, sounds, and usage.
 
 ## Requirements
 
@@ -8,7 +8,7 @@ Codex Beacon is a small macOS menu bar app that gives Codex a local attention su
 - A Mac with Touch Bar for Touch Bar visuals.
 - Codex CLI or Codex Desktop with hooks support.
 - Codex Beacon must be installed in `/Applications`.
-- The app runs a local-only server on `127.0.0.1:17321`.
+- Codex Beacon runs on your Mac and receives Codex signals locally.
 
 ## Install
 

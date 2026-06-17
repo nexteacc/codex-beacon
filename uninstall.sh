@@ -2,6 +2,8 @@
 set -euo pipefail
 
 APP_DEST="/Applications/Codex Beacon.app"
+WIDGET_DEST="$APP_DEST/Contents/PlugIns/CodexBeaconWidget.appex"
+WIDGET_ID="com.codexbeacon.native.widget"
 HOOKS_FILE="$HOME/.codex/hooks.json"
 DATA_DIR="$HOME/Library/Application Support/Codex Beacon"
 REMOVE_DATA=false
@@ -23,6 +25,11 @@ safe_rm_data_dir() {
 }
 
 /usr/bin/osascript -e 'quit application "Codex Beacon"' >/dev/null 2>&1 || true
+
+if [[ -d "$WIDGET_DEST" ]]; then
+  /usr/bin/pluginkit -e ignore -i "$WIDGET_ID" >/dev/null 2>&1 || true
+  /usr/bin/pluginkit -r "$WIDGET_DEST" >/dev/null 2>&1 || true
+fi
 
 if [[ -f "$HOOKS_FILE" ]]; then
   /bin/cp "$HOOKS_FILE" "$HOOKS_FILE.codex-beacon-backup"

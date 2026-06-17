@@ -4,9 +4,9 @@ set -euo pipefail
 ROOT="${0:A:h}"
 APP_NAME="Codex Beacon.app"
 APP_DIR="$ROOT/dist/$APP_NAME"
-CONTENTS="$APP_DIR/Contents"
-MACOS="$CONTENTS/MacOS"
-RESOURCES="$CONTENTS/Resources"
+DERIVED_DATA="${DERIVED_DATA:-/tmp/codexbeacon-package-derived}"
+CONFIGURATION="${CONFIGURATION:-Release}"
+CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
 
 safe_rm_app_dir() {
   [[ "$APP_DIR" == "$ROOT/dist/Codex Beacon.app" ]] || { echo "Refusing to remove unexpected path: $APP_DIR"; exit 1; }
@@ -15,17 +15,26 @@ safe_rm_app_dir() {
 }
 
 cd "$ROOT"
-swift build -c release
+
+xcodebuild \
+  -project "$ROOT/CodexBeacon.xcodeproj" \
+  -scheme "Codex Beacon" \
+  -configuration "$CONFIGURATION" \
+  -derivedDataPath "$DERIVED_DATA" \
+  CODE_SIGN_IDENTITY="$CODE_SIGN_IDENTITY" \
+  CODE_SIGN_STYLE=Manual \
+  DEVELOPMENT_TEAM= \
+  ENABLE_DEBUG_DYLIB=NO \
+  clean build
 
 safe_rm_app_dir
-mkdir -p "$MACOS" "$RESOURCES"
+/usr/bin/ditto "$DERIVED_DATA/Build/Products/$CONFIGURATION/$APP_NAME" "$APP_DIR"
+/bin/chmod +x "$APP_DIR/Contents/Resources/helper/notify.sh"
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
-cp ".build/release/CodexBeacon" "$MACOS/CodexBeacon"
-cp "$ROOT/Info.plist" "$CONTENTS/Info.plist"
-cp "$ROOT/Resources/CodexBeacon.icns" "$RESOURCES/CodexBeacon.icns"
-cp -R "$ROOT/Resources/Presets" "$RESOURCES/Presets"
-cp -R "$ROOT/Resources/helper" "$RESOURCES/helper"
-chmod +x "$MACOS/CodexBeacon"
-chmod +x "$RESOURCES/helper/notify.sh"
+DERIVED_WIDGET="$DERIVED_DATA/Build/Products/$CONFIGURATION/$APP_NAME/Contents/PlugIns/CodexBeaconWidget.appex"
+if [[ -d "$DERIVED_WIDGET" ]]; then
+  /usr/bin/pluginkit -r "$DERIVED_WIDGET" >/dev/null 2>&1 || true
+fi
 
 echo "Built: $APP_DIR"

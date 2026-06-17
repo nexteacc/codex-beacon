@@ -3,6 +3,7 @@ import Foundation
 import Network
 import ObjectiveC
 import QuartzCore
+import WidgetKit
 
 struct BeaconConfig: Codable, Equatable {
     var touchBarVisual: Bool
@@ -66,6 +67,8 @@ final class ConfigStore {
             }
         } catch {
             config = .default
+            config.authToken = Self.makeToken()
+            try? save()
             NSLog("Codex Beacon config error: \(error.localizedDescription)")
         }
     }
@@ -375,7 +378,7 @@ struct BeaconEvent {
     let returnTarget: BeaconReturnTarget
 }
 
-struct CodexUsageWindow: Codable {
+struct CodexUsageWindow: Codable, Equatable {
     let label: String
     let usedPercent: Double
     let remainingPercent: Double
@@ -383,6 +386,15 @@ struct CodexUsageWindow: Codable {
     let resetsAt: Int
     let resetsAtLocal: String
     let resetInSeconds: Int
+
+    static func == (lhs: CodexUsageWindow, rhs: CodexUsageWindow) -> Bool {
+        lhs.label == rhs.label
+            && lhs.usedPercent == rhs.usedPercent
+            && lhs.remainingPercent == rhs.remainingPercent
+            && lhs.windowMinutes == rhs.windowMinutes
+            && lhs.resetsAt == rhs.resetsAt
+            && lhs.resetsAtLocal == rhs.resetsAtLocal
+    }
 }
 
 struct CodexUsageDisplay: Equatable {
@@ -393,7 +405,7 @@ struct CodexUsageDisplay: Equatable {
     let resetAt: Int?
 }
 
-struct CodexUsageSnapshot: Codable {
+struct CodexUsageSnapshot: Codable, Equatable {
     let ok: Bool
     let updatedAt: String
     let planType: String?
@@ -726,6 +738,51 @@ final class CodexUsageReader {
         formatter.formatOptions = [.withInternetDateTime]
         formatter.timeZone = .current
         return formatter.string(from: date)
+    }
+}
+
+final class CodexUsageMonitor {
+    private let reader = CodexUsageReader()
+    private let queue = DispatchQueue(label: "codex-beacon.usage-monitor", qos: .utility)
+    private let snapshotLock = NSLock()
+    private var snapshot: CodexUsageSnapshot?
+    private var isRefreshing = false
+    private var pendingCompletions: [(CodexUsageSnapshot?) -> Void] = []
+
+    func cachedSnapshot() -> CodexUsageSnapshot? {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return snapshot
+    }
+
+    func refresh(completion: ((CodexUsageSnapshot?) -> Void)? = nil) {
+        queue.async { [completion] in
+            if let completion {
+                self.pendingCompletions.append(completion)
+            }
+
+            guard !self.isRefreshing else {
+                return
+            }
+
+            self.isRefreshing = true
+            let nextSnapshot = self.reader.latestSnapshot()
+            self.snapshotLock.lock()
+            self.snapshot = nextSnapshot
+            self.snapshotLock.unlock()
+
+            let completions = self.pendingCompletions
+            self.pendingCompletions = []
+            self.isRefreshing = false
+
+            guard !completions.isEmpty else {
+                return
+            }
+
+            DispatchQueue.main.async {
+                completions.forEach { $0(nextSnapshot) }
+            }
+        }
     }
 }
 
@@ -1288,7 +1345,7 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
         container.addSubview(status)
 
         NSLayoutConstraint.activate([
-            status.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            status.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             status.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             status.widthAnchor.constraint(equalToConstant: usageDisplay == nil ? 300 : 310),
             status.heightAnchor.constraint(equalToConstant: 32)
@@ -1525,16 +1582,8 @@ final class BeaconServer {
     }
 
     private func usage(from request: String) -> String? {
-        guard let query = query(from: request, matchingPath: "/usage") else {
+        guard query(from: request, matchingPath: "/usage") != nil else {
             return nil
-        }
-
-        guard isAuthorized(query) else {
-            return Self.response(
-                status: "401 Unauthorized",
-                contentType: "application/json",
-                body: #"{"ok":false,"error":"unauthorized"}"# + "\n"
-            )
         }
 
         guard let snapshot = usageProvider(),
@@ -1636,7 +1685,7 @@ final class BeaconServer {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let configStore = ConfigStore()
     private let hookInstaller = HookInstaller()
-    private let usageReader = CodexUsageReader()
+    private let usageMonitor = CodexUsageMonitor()
     private lazy var presetStore = PresetStore(appSupportDirectory: configStore.directoryURL)
     private lazy var touchBarBeacon = TouchBarBeacon(
         onCodexTap: { [weak self] in
@@ -1661,6 +1710,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var readyUsagePulseKey: String?
     private var usageRecoveryWorkItem: DispatchWorkItem?
     private var usageRecoveryKey: String?
+    private var lastWidgetSnapshot: CodexUsageSnapshot?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupWindow()
@@ -1727,7 +1777,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.configStore.reload()
                 return self?.configStore.config.authToken
             }, usageProvider: { [weak self] in
-                self?.usageReader.latestSnapshot()
+                let cachedSnapshot = self?.usageMonitor.cachedSnapshot()
+                self?.usageMonitor.refresh()
+                return cachedSnapshot
             }) { [weak self] event in
                 self?.display(event)
             }
@@ -1807,14 +1859,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refreshUsageDisplay(triggeredByRecoveryTimer: Bool = false) {
         configStore.reload()
-        guard currentState == .idle,
-              let usageDisplay = usageReader.latestSnapshot()?.display(for: configStore.config.selectedUsageWindow) else {
-            if currentState == .idle {
-                touchBarBeacon.setUsage(nil)
+        guard currentState == .idle else {
+            clearUsageDisplay()
+            return
+        }
+
+        let cachedSnapshot = usageMonitor.cachedSnapshot()
+        if let cachedSnapshot {
+            applyUsageSnapshot(cachedSnapshot, selection: configStore.config.selectedUsageWindow, playRecoverySound: false, publishWidgetUpdate: false)
+        }
+
+        usageMonitor.refresh { [weak self] snapshot in
+            guard let self else { return }
+            self.configStore.reload()
+            guard self.currentState == .idle else {
+                self.clearUsageDisplay()
+                return
             }
-            limitedUsagePulseKey = nil
-            readyUsagePulseKey = nil
-            cancelUsageRecovery()
+            self.applyUsageSnapshot(
+                snapshot,
+                selection: self.configStore.config.selectedUsageWindow,
+                playRecoverySound: triggeredByRecoveryTimer,
+                publishWidgetUpdate: true
+            )
+        }
+    }
+
+    private func applyUsageSnapshot(
+        _ snapshot: CodexUsageSnapshot?,
+        selection: UsageWindowSelection,
+        playRecoverySound: Bool,
+        publishWidgetUpdate: Bool
+    ) {
+        guard let usageDisplay = snapshot?.display(for: selection) else {
+            clearUsageDisplay()
+            publishWidgetSnapshotIfNeeded(snapshot, enabled: publishWidgetUpdate)
             return
         }
 
@@ -1840,9 +1919,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         touchBarBeacon.setUsage(usageDisplay, pulse: shouldPulse)
+        publishWidgetSnapshotIfNeeded(snapshot, enabled: publishWidgetUpdate)
 
-        if triggeredByRecoveryTimer && usageDisplay.isReady && configStore.config.sound {
+        if playRecoverySound && usageDisplay.isReady && configStore.config.sound {
             NSSound(named: NSSound.Name("Ping"))?.play()
+        }
+    }
+
+    private func clearUsageDisplay() {
+        if currentState == .idle {
+            touchBarBeacon.setUsage(nil)
+        }
+        limitedUsagePulseKey = nil
+        readyUsagePulseKey = nil
+        cancelUsageRecovery()
+    }
+
+    private func publishWidgetSnapshotIfNeeded(_ snapshot: CodexUsageSnapshot?, enabled: Bool) {
+        guard enabled, snapshot != lastWidgetSnapshot else {
+            return
+        }
+        lastWidgetSnapshot = snapshot
+        if #available(macOS 14.0, *) {
+            WidgetCenter.shared.reloadTimelines(ofKind: "CodexUsageWidget")
         }
     }
 

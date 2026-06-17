@@ -2,6 +2,8 @@
 .swiftpm/
 DerivedData/
 *.xcodeproj/
+!CodexBeacon.xcodeproj/
+!CodexBeacon.xcodeproj/project.pbxproj
 dist/
 .dmg-stage/
 .DS_Store
