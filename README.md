@@ -5,7 +5,8 @@ Codex Beacon is a small local-first macOS menu bar app for Codex signals: Touch 
 ## Requirements
 
 - macOS 12 or later.
-- A Mac with Touch Bar for Touch Bar visuals.
+- macOS 14 or later for the Widget.
+- A Mac with Touch Bar is only required for Touch Bar visuals; other Macs can use the menu bar app and Widget.
 - Codex CLI or Codex Desktop with hooks support.
 - Codex Beacon must be installed in `/Applications`.
 - Codex Beacon runs on your Mac and receives Codex signals locally.
@@ -42,6 +43,7 @@ xattr -dr com.apple.quarantine "/Applications/Codex Beacon.app"
 ## Notes
 
 - This preview is not signed or notarized.
+- Release builds are universal binaries for Intel and Apple Silicon Macs.
 - Hooks are installed into `~/.codex/hooks.json`.
 - Config lives in `~/Library/Application Support/Codex Beacon/`.
-- Touch Bar support uses macOS private Touch Bar APIs, so this tool is intentionally for older Touch Bar Macs.
+- Touch Bar support uses private macOS APIs and activates only on supported Touch Bar Macs; it is optional for Widget users.
