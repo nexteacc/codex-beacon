@@ -945,63 +945,16 @@ final class StatusDotView: NSView {
     }
 }
 
-final class BeaconToggle: NSControl {
-    private let trackLayer = CALayer()
-    private let knobLayer = CALayer()
-    var isOn: Bool = true {
-        didSet {
-            needsLayout = true
-            updateLayerColors()
-        }
-    }
-
-    override var intrinsicContentSize: NSSize {
-        NSSize(width: 44, height: 24)
-    }
-
+final class BeaconSwitch: NSSwitch {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        wantsLayer = true
+        controlSize = .small
         focusRingType = .none
-        layer?.addSublayer(trackLayer)
-        layer?.addSublayer(knobLayer)
-        knobLayer.shadowColor = NSColor.black.cgColor
-        knobLayer.shadowOpacity = 0.16
-        knobLayer.shadowOffset = NSSize(width: 0, height: 1)
-        knobLayer.shadowRadius = 2
-        updateLayerColors()
+        refusesFirstResponder = true
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
-    }
-
-    override func layout() {
-        super.layout()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-
-        let trackFrame = bounds.insetBy(dx: 0, dy: 1)
-        trackLayer.frame = trackFrame
-        trackLayer.cornerRadius = trackFrame.height / 2
-
-        let knobSize = trackFrame.height - 4
-        let knobX = isOn ? trackFrame.maxX - knobSize - 2 : trackFrame.minX + 2
-        knobLayer.frame = NSRect(x: knobX, y: trackFrame.minY + 2, width: knobSize, height: knobSize)
-        knobLayer.cornerRadius = knobSize / 2
-        knobLayer.shadowPath = CGPath(ellipseIn: knobLayer.bounds, transform: nil)
-
-        CATransaction.commit()
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        isOn.toggle()
-        sendAction(action, to: target)
-    }
-
-    private func updateLayerColors() {
-        trackLayer.backgroundColor = (isOn ? NSColor.systemGreen : NSColor.controlColor).cgColor
-        knobLayer.backgroundColor = NSColor.white.cgColor
     }
 }
 
@@ -1033,17 +986,18 @@ final class SettingsViewController: NSViewController {
     private let mobileNotifications: MobileNotificationsManager
     private let usageSnapshotProvider: () -> CodexUsageSnapshot?
     private let onChange: () -> Void
-    private let touchBarSwitch = BeaconToggle()
-    private let soundSwitch = BeaconToggle()
-    private let usageControl = NSSegmentedControl(labels: ["5h", "Weekly"], trackingMode: .selectOne, target: nil, action: nil)
+    private let touchBarSwitch = BeaconSwitch()
+    private let soundSwitch = BeaconSwitch()
+    private let usageControl = NSSegmentedControl(labels: ["5 Hours", "Weekly"], trackingMode: .selectOne, target: nil, action: nil)
     private let hooksButton = NSButton(title: "Install Hooks", target: nil, action: nil)
+    private let hooksStatusDot = StatusDotView()
+    private let hooksStatusLabel = NSTextField(labelWithString: "Checking")
     private let mobileStatusDot = StatusDotView()
     private let mobileStatusLabel = NSTextField(labelWithString: "Not Configured")
     private let barkURLField = PasteableTextField(string: "")
-    private let pasteBarkURLButton = NSButton()
-    private let testNotificationButton = NSButton(title: "Test", target: nil, action: nil)
-    private let disconnectButton = NSButton(title: "Disconnect", target: nil, action: nil)
-    private let serverDot = StatusDotView()
+    private let testNotificationButton = NSButton(title: "Connect", target: nil, action: nil)
+    private let mobileMoreButton = NSButton()
+    private var barkURLGridRow: NSGridRow?
     private var isServerReady = false
     private var isTestingMobileNotifications = false
     private var mobileStatusOverride: (text: String, color: NSColor, detail: String?)?
@@ -1070,40 +1024,42 @@ final class SettingsViewController: NSViewController {
     }
 
     override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 348, height: 260))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 440, height: 300))
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
-        let touchBarRow = row(title: "Touch Bar", control: touchBarSwitch)
-        let soundRow = row(title: "Sound", control: soundSwitch)
-        let usageRow = row(title: "Usage", control: usageControl)
-        let hooksRow = hookRow()
-        let mobileStatusRow = row(title: "iPhone", control: mobileStatusControl())
-        let barkURLRow = row(title: "Bark URL", control: barkURLControl())
+        configureControls()
 
-        usageControl.segmentStyle = .rounded
-        usageControl.controlSize = .small
-        usageControl.setWidth(56, forSegment: 0)
-        usageControl.setWidth(78, forSegment: 1)
+        let urlRow = barkConnectionRow()
 
-        let stack = NSStackView(views: [touchBarRow, soundRow, usageRow, hooksRow, mobileStatusRow, barkURLRow])
+        let settingsGrid = grid(rows: [
+            [rowLabel("Touch Bar"), touchBarSwitch],
+            [rowLabel("Sounds"), soundSwitch],
+            [rowLabel("Usage"), usageControl]
+        ])
+
+        let connectionsGrid = grid(rows: [
+            [hookStatusControl(), hooksActionsControl()],
+            [mobileStatusControl(), mobileActionsControl()],
+            [rowLabel("Bark Push URL", secondary: true), urlRow]
+        ])
+        barkURLGridRow = connectionsGrid.row(at: 2)
+
+        let divider = NSBox()
+        divider.boxType = .separator
+
+        let stack = NSStackView(views: [settingsGrid, divider, connectionsGrid])
         stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 13
+        stack.alignment = .width
+        stack.spacing = 16
         stack.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(stack)
 
-        serverDot.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(serverDot)
-
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24),
-            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
-            stack.centerYAnchor.constraint(equalTo: root.centerYAnchor),
-            serverDot.topAnchor.constraint(equalTo: root.topAnchor, constant: 14),
-            serverDot.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
-            serverDot.widthAnchor.constraint(equalToConstant: 8),
-            serverDot.heightAnchor.constraint(equalToConstant: 8)
+            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
+            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 28),
+            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -28),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: root.bottomAnchor, constant: -20)
         ])
 
         touchBarSwitch.target = self
@@ -1116,20 +1072,17 @@ final class SettingsViewController: NSViewController {
         hooksButton.action = #selector(installHooks)
         testNotificationButton.target = self
         testNotificationButton.action = #selector(testMobileNotification)
-        pasteBarkURLButton.target = self
-        pasteBarkURLButton.action = #selector(pasteBarkURL)
-        disconnectButton.target = self
-        disconnectButton.action = #selector(disconnectMobileNotifications)
+        mobileMoreButton.target = self
+        mobileMoreButton.action = #selector(showMobileMenu)
 
         self.view = root
         refresh()
     }
 
     func refresh() {
-        touchBarSwitch.isOn = configStore.config.touchBarVisual
-        soundSwitch.isOn = configStore.config.sound
+        touchBarSwitch.state = configStore.config.touchBarVisual ? .on : .off
+        soundSwitch.state = configStore.config.sound ? .on : .off
         usageControl.selectedSegment = configStore.config.selectedUsageWindow == .fiveHour ? 0 : 1
-        serverDot.setColor(isServerReady ? .systemGreen : .systemRed, tooltip: isServerReady ? "Ready" : "Port busy")
         refreshHooks()
         refreshMobileNotifications()
     }
@@ -1139,114 +1092,120 @@ final class SettingsViewController: NSViewController {
         refresh()
     }
 
-    private func row(title: String, control: NSView) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+    private func configureControls() {
+        usageControl.segmentStyle = .rounded
+        usageControl.controlSize = .small
+        usageControl.setWidth(84, forSegment: 0)
+        usageControl.setWidth(84, forSegment: 1)
 
-        let row = NSStackView(views: [label, control])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.distribution = .gravityAreas
-        row.translatesAutoresizingMaskIntoConstraints = false
-        row.widthAnchor.constraint(equalToConstant: 300).isActive = true
-        label.widthAnchor.constraint(equalToConstant: 92).isActive = true
-        return row
+        [hooksButton, testNotificationButton].forEach {
+            $0.bezelStyle = .rounded
+            $0.controlSize = .small
+            $0.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+            $0.widthAnchor.constraint(equalToConstant: 84).isActive = true
+        }
+
+        mobileMoreButton.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "iPhone notification options")
+        mobileMoreButton.bezelStyle = .inline
+        mobileMoreButton.isBordered = false
+        mobileMoreButton.toolTip = "iPhone notification options"
+        mobileMoreButton.setAccessibilityLabel("iPhone notification options")
+        mobileMoreButton.widthAnchor.constraint(equalToConstant: 24).isActive = true
     }
 
-    private func hookRow() -> NSView {
-        let label = NSTextField(labelWithString: "Hooks")
-        label.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+    private func grid(rows: [[NSView]]) -> NSGridView {
+        let grid = NSGridView(views: rows)
+        grid.columnSpacing = 18
+        grid.rowSpacing = 8
+        grid.column(at: 0).xPlacement = .leading
+        grid.column(at: 1).xPlacement = .trailing
+        for index in 0..<rows.count {
+            grid.row(at: index).height = 32
+            grid.row(at: index).yPlacement = .center
+        }
+        return grid
+    }
 
-        hooksButton.bezelStyle = .rounded
-        hooksButton.controlSize = .small
-        hooksButton.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+    private func rowLabel(_ text: String, secondary: Bool = false) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = NSFont.systemFont(ofSize: secondary ? 11 : 13, weight: .medium)
+        label.textColor = secondary ? .secondaryLabelColor : .labelColor
+        return label
+    }
 
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-
-        let row = NSStackView(views: [label, spacer, hooksButton])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 10
-        row.translatesAutoresizingMaskIntoConstraints = false
-        row.widthAnchor.constraint(equalToConstant: 300).isActive = true
-        label.widthAnchor.constraint(equalToConstant: 92).isActive = true
-        hooksButton.widthAnchor.constraint(equalToConstant: 76).isActive = true
-        return row
+    private func hookStatusControl() -> NSView {
+        hooksStatusLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        let status = NSStackView(views: [hooksStatusDot, hooksStatusLabel])
+        status.orientation = .horizontal
+        status.alignment = .centerY
+        status.spacing = 9
+        return status
     }
 
     private func mobileStatusControl() -> NSView {
-        mobileStatusLabel.font = NSFont.systemFont(ofSize: 12)
-        mobileStatusLabel.lineBreakMode = .byTruncatingTail
-
-        disconnectButton.bezelStyle = .rounded
-        disconnectButton.controlSize = .small
-        disconnectButton.font = NSFont.systemFont(ofSize: 11, weight: .medium)
-
+        mobileStatusLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
         let status = NSStackView(views: [mobileStatusDot, mobileStatusLabel])
         status.orientation = .horizontal
         status.alignment = .centerY
-        status.spacing = 7
-
-        let control = NSStackView(views: [status, disconnectButton])
-        control.orientation = .horizontal
-        control.alignment = .centerY
-        control.distribution = .gravityAreas
-        control.spacing = 8
-        return control
+        status.spacing = 9
+        return status
     }
 
-    private func barkURLControl() -> NSView {
+    private func mobileActionsControl() -> NSView {
+        let actions = NSStackView(views: [testNotificationButton, mobileMoreButton])
+        actions.orientation = .horizontal
+        actions.alignment = .centerY
+        actions.spacing = 8
+        return actions
+    }
+
+    private func hooksActionsControl() -> NSView {
+        let menuSlot = NSView()
+        menuSlot.widthAnchor.constraint(equalToConstant: 24).isActive = true
+
+        let actions = NSStackView(views: [hooksButton, menuSlot])
+        actions.orientation = .horizontal
+        actions.alignment = .centerY
+        actions.spacing = 8
+        return actions
+    }
+
+    private func barkConnectionRow() -> NSView {
         barkURLField.placeholderString = "https://api.day.app/..."
         barkURLField.toolTip = "Paste the Push URL copied from Bark."
         barkURLField.controlSize = .small
         barkURLField.font = NSFont.systemFont(ofSize: 12)
         barkURLField.isEditable = true
         barkURLField.isSelectable = true
-
-        pasteBarkURLButton.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "Paste Bark URL")
-        pasteBarkURLButton.bezelStyle = .inline
-        pasteBarkURLButton.isBordered = false
-        pasteBarkURLButton.toolTip = "Paste Bark URL"
-        pasteBarkURLButton.setAccessibilityLabel("Paste Bark URL")
-        pasteBarkURLButton.widthAnchor.constraint(equalToConstant: 22).isActive = true
-
-        testNotificationButton.bezelStyle = .rounded
-        testNotificationButton.controlSize = .small
-        testNotificationButton.font = NSFont.systemFont(ofSize: 11, weight: .medium)
-        testNotificationButton.widthAnchor.constraint(equalToConstant: 48).isActive = true
-
-        let control = NSStackView(views: [barkURLField, pasteBarkURLButton, testNotificationButton])
-        control.orientation = .horizontal
-        control.alignment = .centerY
-        control.spacing = 8
-        return control
+        barkURLField.widthAnchor.constraint(equalToConstant: 250).isActive = true
+        return barkURLField
     }
 
     private func refreshMobileNotifications() {
         let configured = mobileNotifications.isConfigured
         let requiresReconnect = mobileNotifications.requiresReconnect
         if isTestingMobileNotifications {
-            mobileStatusLabel.stringValue = "Testing"
+            mobileStatusLabel.stringValue = "iPhone Testing"
             mobileStatusDot.setColor(.systemOrange, tooltip: "Sending a test notification")
         } else if let mobileStatusOverride {
-            mobileStatusLabel.stringValue = mobileStatusOverride.text
+            mobileStatusLabel.stringValue = "iPhone \(mobileStatusOverride.text)"
             mobileStatusDot.setColor(mobileStatusOverride.color, tooltip: mobileStatusOverride.detail ?? mobileStatusOverride.text)
         } else if configured {
-            mobileStatusLabel.stringValue = "Configured"
+            mobileStatusLabel.stringValue = "iPhone Connected"
             mobileStatusDot.setColor(.systemGreen, tooltip: "Bark notifications configured")
         } else if requiresReconnect {
-            mobileStatusLabel.stringValue = "Reconnect Bark"
+            mobileStatusLabel.stringValue = "iPhone Reconnect Required"
             mobileStatusDot.setColor(.systemOrange, tooltip: "Paste the Bark Push URL and test again")
         } else {
-            mobileStatusLabel.stringValue = "Not Configured"
+            mobileStatusLabel.stringValue = "iPhone Not Connected"
             mobileStatusDot.setColor(.systemGray, tooltip: "Paste a Bark URL and test it")
         }
 
-        disconnectButton.isHidden = !configured
-        disconnectButton.isEnabled = configured && !isTestingMobileNotifications
+        testNotificationButton.title = configured ? "Send Test" : "Connect"
+        mobileMoreButton.isHidden = !configured
+        mobileMoreButton.isEnabled = configured && !isTestingMobileNotifications
+        barkURLGridRow?.isHidden = configured
         barkURLField.isEnabled = !isTestingMobileNotifications
-        pasteBarkURLButton.isEnabled = !isTestingMobileNotifications
         testNotificationButton.isEnabled = !isTestingMobileNotifications
     }
 
@@ -1254,31 +1213,43 @@ final class SettingsViewController: NSViewController {
         let state = hookInstaller.state()
         switch state {
         case .installed:
+            hooksStatusLabel.stringValue = "Hooks"
+            hooksStatusDot.setColor(isServerReady ? .systemGreen : .systemRed, tooltip: isServerReady ? "Hooks active" : "Local service unavailable")
             hooksButton.title = "Repair"
-            hooksButton.toolTip = state.detail
+            hooksButton.toolTip = "Reinstall Codex hooks"
             hooksButton.isEnabled = true
+            hooksButton.isHidden = false
         case .invalid:
+            hooksStatusLabel.stringValue = "Hooks"
+            hooksStatusDot.setColor(.systemOrange, tooltip: state.detail)
             hooksButton.title = "Repair"
             hooksButton.toolTip = state.detail
             hooksButton.isEnabled = true
+            hooksButton.isHidden = false
         case .moveToApplications:
+            hooksStatusLabel.stringValue = "Hooks"
+            hooksStatusDot.setColor(.systemOrange, tooltip: state.detail)
             hooksButton.title = "Move App"
             hooksButton.toolTip = state.detail
             hooksButton.isEnabled = true
+            hooksButton.isHidden = false
         case .missing:
+            hooksStatusLabel.stringValue = "Hooks"
+            hooksStatusDot.setColor(.systemGray, tooltip: state.detail)
             hooksButton.title = "Install"
             hooksButton.toolTip = state.detail
             hooksButton.isEnabled = state.canInstall
+            hooksButton.isHidden = false
         }
     }
 
     @objc private func touchBarChanged() {
-        configStore.setTouchBarVisual(touchBarSwitch.isOn)
+        configStore.setTouchBarVisual(touchBarSwitch.state == .on)
         onChange()
     }
 
     @objc private func soundChanged() {
-        configStore.setSound(soundSwitch.isOn)
+        configStore.setSound(soundSwitch.state == .on)
         onChange()
     }
 
@@ -1323,9 +1294,12 @@ final class SettingsViewController: NSViewController {
         }
     }
 
-    @objc private func pasteBarkURL() {
-        barkURLField.pasteFromClipboard()
-        view.window?.makeFirstResponder(barkURLField)
+    @objc private func showMobileMenu() {
+        let menu = NSMenu()
+        let disconnect = NSMenuItem(title: "Disconnect Bark", action: #selector(disconnectMobileNotifications), keyEquivalent: "")
+        disconnect.target = self
+        menu.addItem(disconnect)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: mobileMoreButton.bounds.height + 4), in: mobileMoreButton)
     }
 
     @objc private func disconnectMobileNotifications() {
@@ -1930,7 +1904,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsController = controller
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 388, height: 332),
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 300),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
