@@ -365,7 +365,7 @@
 				INFOPLIST_FILE = Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				OTHER_LDFLAGS = "$(inherited) -framework AppKit -framework Network -framework Security";
+				OTHER_LDFLAGS = "$(inherited) -framework AppKit -framework Network";
 				PRODUCT_BUNDLE_IDENTIFIER = com.codexbeacon.native;
 				PRODUCT_NAME = "Codex Beacon";
 				SWIFT_VERSION = 5.0;
@@ -382,7 +382,7 @@
 				INFOPLIST_FILE = Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				OTHER_LDFLAGS = "$(inherited) -framework AppKit -framework Network -framework Security";
+				OTHER_LDFLAGS = "$(inherited) -framework AppKit -framework Network";
 				PRODUCT_BUNDLE_IDENTIFIER = com.codexbeacon.native;
 				PRODUCT_NAME = "Codex Beacon";
 				SWIFT_VERSION = 5.0;

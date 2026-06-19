@@ -1,18 +1,17 @@
 import Foundation
-import Security
 
 enum MobileNotificationError: LocalizedError {
     case invalidBarkURL
-    case keychain(OSStatus)
+    case credentialStore
     case invalidResponse
     case server(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidBarkURL:
-            return "Paste the Bark URL shown in the iPhone app."
-        case .keychain:
-            return "The Bark URL could not be saved securely."
+            return "Paste the Push URL copied from Bark."
+        case .credentialStore:
+            return "The Bark URL could not be saved locally."
         case .invalidResponse:
             return "Bark returned an invalid response."
         case .server(let message):
@@ -34,27 +33,27 @@ struct BarkEndpoint {
             throw MobileNotificationError.invalidBarkURL
         }
 
-        let pathParts = components.path.split(separator: "/").map(String.init)
-        guard let key = pathParts.first,
-              key.range(of: #"^[A-Za-z0-9_-]{8,256}$"#, options: .regularExpression) != nil else {
+        let pathParts = components.path.split(separator: "/", omittingEmptySubsequences: true)
+        guard let encodedKey = pathParts.first,
+              let key = String(encodedKey).removingPercentEncoding,
+              !key.isEmpty else {
             throw MobileNotificationError.invalidBarkURL
         }
         deviceKey = key
     }
 }
 
-final class BarkCredentialStore {
-    private let service = "com.codexbeacon.native.bark"
-    private let account = "device-key"
+final class BarkDeviceKeyStore {
+    private let directoryURL: URL
+    private let fileURL: URL
+
+    init(appSupportDirectory: URL) {
+        directoryURL = appSupportDirectory
+        fileURL = appSupportDirectory.appendingPathComponent("bark-device-key")
+    }
 
     func load() -> String? {
-        var query = baseQuery
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data,
+        guard let data = try? Data(contentsOf: fileURL),
               let value = String(data: data, encoding: .utf8),
               !value.isEmpty else {
             return nil
@@ -63,36 +62,23 @@ final class BarkCredentialStore {
     }
 
     func save(_ deviceKey: String) throws {
-        let data = Data(deviceKey.utf8)
-        let status: OSStatus
-        if load() == nil {
-            var query = baseQuery
-            query[kSecValueData as String] = data
-            status = SecItemAdd(query as CFDictionary, nil)
-        } else {
-            status = SecItemUpdate(
-                baseQuery as CFDictionary,
-                [kSecValueData as String: data] as CFDictionary
-            )
-        }
-        guard status == errSecSuccess else {
-            throw MobileNotificationError.keychain(status)
+        do {
+            try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directoryURL.path)
+            try Data(deviceKey.utf8).write(to: fileURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+        } catch {
+            throw MobileNotificationError.credentialStore
         }
     }
 
     func delete() throws {
-        let status = SecItemDelete(baseQuery as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw MobileNotificationError.keychain(status)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        do {
+            try FileManager.default.removeItem(at: fileURL)
+        } catch {
+            throw MobileNotificationError.credentialStore
         }
-    }
-
-    private var baseQuery: [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
     }
 }
 
@@ -146,16 +132,20 @@ final class BarkClient {
             let result: Result<Void, Error>
             if let error {
                 result = .failure(error)
-            } else if let response = response as? HTTPURLResponse,
-                      (200..<300).contains(response.statusCode) {
-                if let data,
-                   let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let code = object["code"] as? Int,
-                   code != 200 {
-                    let message = object["message"] as? String ?? "Bark rejected the notification."
+            } else if let response = response as? HTTPURLResponse {
+                let object = data.flatMap {
+                    try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+                }
+                let message = object?["message"] as? String
+
+                if (200..<300).contains(response.statusCode),
+                   let code = object?["code"] as? Int,
+                   code == 200 {
+                    result = .success(())
+                } else if let message, !message.isEmpty {
                     result = .failure(MobileNotificationError.server(message))
                 } else {
-                    result = .success(())
+                    result = .failure(MobileNotificationError.server("Bark request failed (HTTP \(response.statusCode))."))
                 }
             } else {
                 result = .failure(MobileNotificationError.invalidResponse)
@@ -187,29 +177,18 @@ private struct UsageNotice {
         case .fifty, .ten:
             return "\(label) usage has \(Int(remainingPercent.rounded()))% remaining"
         case .exhausted:
-            return "\(label) usage is exhausted · Back \(Self.relativeResetText(resetsAt))"
+            return "\(label) usage exhausted · Back \(resetDisplayText)"
         case .recovered:
             return "\(label) usage is available again"
         }
     }
 
-    private static func relativeResetText(_ resetsAt: Int) -> String {
-        let remaining = max(0, resetsAt - Int(Date().timeIntervalSince1970))
-        if remaining < 60 {
-            return "soon"
-        }
-        let minutes = Int(ceil(Double(remaining) / 60.0))
-        if minutes < 60 {
-            return "in \(minutes)m"
-        }
-        let hours = minutes / 60
-        let leftoverMinutes = minutes % 60
-        if hours < 24 {
-            return leftoverMinutes == 0 ? "in \(hours)h" : "in \(hours)h \(leftoverMinutes)m"
-        }
-        let days = hours / 24
-        let leftoverHours = hours % 24
-        return leftoverHours == 0 ? "in \(days)d" : "in \(days)d \(leftoverHours)h"
+    private var resetDisplayText: String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = selection == .fiveHour ? "HH:mm" : "MMM d"
+        return formatter.string(from: Date(timeIntervalSince1970: TimeInterval(resetsAt)))
     }
 }
 
@@ -229,6 +208,7 @@ private struct UsageNotificationLedger: Codable {
 final class UsageNotificationPolicy {
     private let fileURL: URL
     private var ledger: UsageNotificationLedger
+    private var pendingRollbackLedger: UsageNotificationLedger?
 
     init(appSupportDirectory: URL) {
         fileURL = appSupportDirectory.appendingPathComponent("mobile-notifications.json")
@@ -240,13 +220,31 @@ final class UsageNotificationPolicy {
         }
     }
 
+    var hasPersistedState: Bool {
+        !ledger.windows.isEmpty && FileManager.default.fileExists(atPath: fileURL.path)
+    }
+
     func notification(for snapshot: CodexUsageSnapshot) -> BarkNotification? {
+        guard pendingRollbackLedger == nil else { return nil }
+        let rollbackLedger = ledger
         let newNotices: [UsageNotice] = [UsageWindowSelection.fiveHour, .weekly].flatMap {
             usageNotices(for: $0, snapshot: snapshot)
         }
         guard !newNotices.isEmpty else { return nil }
-        save()
+        pendingRollbackLedger = rollbackLedger
         return BarkNotification(title: "Codex Usage", body: newNotices.map(\.line).joined(separator: "\n"))
+    }
+
+    func commitPendingNotification() {
+        guard pendingRollbackLedger != nil else { return }
+        pendingRollbackLedger = nil
+        save()
+    }
+
+    func rollbackPendingNotification() {
+        guard let rollbackLedger = pendingRollbackLedger else { return }
+        ledger = rollbackLedger
+        pendingRollbackLedger = nil
     }
 
     func testNotification(for snapshot: CodexUsageSnapshot?) -> BarkNotification {
@@ -270,7 +268,7 @@ final class UsageNotificationPolicy {
             let label = selection == .fiveHour ? "5h" : "Weekly"
             return "\(label) \(Int(window.remainingPercent.rounded()))% remaining"
         }
-        let body = lines.isEmpty ? "iPhone notifications are ready" : "Connected · " + lines.joined(separator: " · ")
+        let body = lines.isEmpty ? "iPhone notifications are ready" : lines.joined(separator: "\n")
         return BarkNotification(title: "Codex Beacon", body: body)
     }
 
@@ -290,6 +288,7 @@ final class UsageNotificationPolicy {
 
     func reset() {
         ledger = UsageNotificationLedger()
+        pendingRollbackLedger = nil
         try? FileManager.default.removeItem(at: fileURL)
     }
 
@@ -397,17 +396,22 @@ final class UsageNotificationPolicy {
 }
 
 final class MobileNotificationsManager {
-    private let credentialStore = BarkCredentialStore()
+    private let credentialStore: BarkDeviceKeyStore
     private let client = BarkClient()
     private let policy: UsageNotificationPolicy
     private var isSendingUsageNotification = false
 
     init(appSupportDirectory: URL) {
+        credentialStore = BarkDeviceKeyStore(appSupportDirectory: appSupportDirectory)
         policy = UsageNotificationPolicy(appSupportDirectory: appSupportDirectory)
     }
 
     var isConfigured: Bool {
         credentialStore.load() != nil
+    }
+
+    var requiresReconnect: Bool {
+        !isConfigured && policy.hasPersistedState
     }
 
     func test(urlString: String?, snapshot: CodexUsageSnapshot?, completion: @escaping (Result<Void, Error>) -> Void) {
@@ -456,8 +460,13 @@ final class MobileNotificationsManager {
 
         isSendingUsageNotification = true
         client.send(deviceKey: deviceKey, notification: notification) { [weak self] result in
-            self?.isSendingUsageNotification = false
-            if case .failure(let error) = result {
+            guard let self else { return }
+            self.isSendingUsageNotification = false
+            switch result {
+            case .success:
+                self.policy.commitPendingNotification()
+            case .failure(let error):
+                self.policy.rollbackPendingNotification()
                 NSLog("Codex Beacon Bark delivery failed: \(error.localizedDescription)")
             }
         }

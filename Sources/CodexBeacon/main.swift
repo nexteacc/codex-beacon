@@ -1005,6 +1005,28 @@ final class BeaconToggle: NSControl {
     }
 }
 
+final class PasteableTextField: NSTextField {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option])
+        if currentEditor() != nil,
+           modifiers == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "v" {
+            return pasteFromClipboard()
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    @discardableResult
+    func pasteFromClipboard() -> Bool {
+        guard let value = NSPasteboard.general.string(forType: .string) else {
+            NSSound.beep()
+            return false
+        }
+        stringValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return true
+    }
+}
+
 final class SettingsViewController: NSViewController {
     private let configStore: ConfigStore
     private let hookInstaller: HookInstaller
@@ -1017,7 +1039,8 @@ final class SettingsViewController: NSViewController {
     private let hooksButton = NSButton(title: "Install Hooks", target: nil, action: nil)
     private let mobileStatusDot = StatusDotView()
     private let mobileStatusLabel = NSTextField(labelWithString: "Not Configured")
-    private let barkURLField = NSSecureTextField(string: "")
+    private let barkURLField = PasteableTextField(string: "")
+    private let pasteBarkURLButton = NSButton()
     private let testNotificationButton = NSButton(title: "Test", target: nil, action: nil)
     private let disconnectButton = NSButton(title: "Disconnect", target: nil, action: nil)
     private let serverDot = StatusDotView()
@@ -1047,7 +1070,7 @@ final class SettingsViewController: NSViewController {
     }
 
     override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 260))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 348, height: 260))
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
@@ -1093,6 +1116,8 @@ final class SettingsViewController: NSViewController {
         hooksButton.action = #selector(installHooks)
         testNotificationButton.target = self
         testNotificationButton.action = #selector(testMobileNotification)
+        pasteBarkURLButton.target = self
+        pasteBarkURLButton.action = #selector(pasteBarkURL)
         disconnectButton.target = self
         disconnectButton.action = #selector(disconnectMobileNotifications)
 
@@ -1123,7 +1148,7 @@ final class SettingsViewController: NSViewController {
         row.alignment = .centerY
         row.distribution = .gravityAreas
         row.translatesAutoresizingMaskIntoConstraints = false
-        row.widthAnchor.constraint(equalToConstant: 252).isActive = true
+        row.widthAnchor.constraint(equalToConstant: 300).isActive = true
         label.widthAnchor.constraint(equalToConstant: 92).isActive = true
         return row
     }
@@ -1144,7 +1169,7 @@ final class SettingsViewController: NSViewController {
         row.alignment = .centerY
         row.spacing = 10
         row.translatesAutoresizingMaskIntoConstraints = false
-        row.widthAnchor.constraint(equalToConstant: 252).isActive = true
+        row.widthAnchor.constraint(equalToConstant: 300).isActive = true
         label.widthAnchor.constraint(equalToConstant: 92).isActive = true
         hooksButton.widthAnchor.constraint(equalToConstant: 76).isActive = true
         return row
@@ -1172,16 +1197,26 @@ final class SettingsViewController: NSViewController {
     }
 
     private func barkURLControl() -> NSView {
-        barkURLField.placeholderString = "Paste from Bark"
+        barkURLField.placeholderString = "https://api.day.app/..."
+        barkURLField.toolTip = "Paste the Push URL copied from Bark."
         barkURLField.controlSize = .small
         barkURLField.font = NSFont.systemFont(ofSize: 12)
+        barkURLField.isEditable = true
+        barkURLField.isSelectable = true
+
+        pasteBarkURLButton.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "Paste Bark URL")
+        pasteBarkURLButton.bezelStyle = .inline
+        pasteBarkURLButton.isBordered = false
+        pasteBarkURLButton.toolTip = "Paste Bark URL"
+        pasteBarkURLButton.setAccessibilityLabel("Paste Bark URL")
+        pasteBarkURLButton.widthAnchor.constraint(equalToConstant: 22).isActive = true
 
         testNotificationButton.bezelStyle = .rounded
         testNotificationButton.controlSize = .small
         testNotificationButton.font = NSFont.systemFont(ofSize: 11, weight: .medium)
         testNotificationButton.widthAnchor.constraint(equalToConstant: 48).isActive = true
 
-        let control = NSStackView(views: [barkURLField, testNotificationButton])
+        let control = NSStackView(views: [barkURLField, pasteBarkURLButton, testNotificationButton])
         control.orientation = .horizontal
         control.alignment = .centerY
         control.spacing = 8
@@ -1190,6 +1225,7 @@ final class SettingsViewController: NSViewController {
 
     private func refreshMobileNotifications() {
         let configured = mobileNotifications.isConfigured
+        let requiresReconnect = mobileNotifications.requiresReconnect
         if isTestingMobileNotifications {
             mobileStatusLabel.stringValue = "Testing"
             mobileStatusDot.setColor(.systemOrange, tooltip: "Sending a test notification")
@@ -1199,6 +1235,9 @@ final class SettingsViewController: NSViewController {
         } else if configured {
             mobileStatusLabel.stringValue = "Configured"
             mobileStatusDot.setColor(.systemGreen, tooltip: "Bark notifications configured")
+        } else if requiresReconnect {
+            mobileStatusLabel.stringValue = "Reconnect Bark"
+            mobileStatusDot.setColor(.systemOrange, tooltip: "Paste the Bark Push URL and test again")
         } else {
             mobileStatusLabel.stringValue = "Not Configured"
             mobileStatusDot.setColor(.systemGray, tooltip: "Paste a Bark URL and test it")
@@ -1207,6 +1246,7 @@ final class SettingsViewController: NSViewController {
         disconnectButton.isHidden = !configured
         disconnectButton.isEnabled = configured && !isTestingMobileNotifications
         barkURLField.isEnabled = !isTestingMobileNotifications
+        pasteBarkURLButton.isEnabled = !isTestingMobileNotifications
         testNotificationButton.isEnabled = !isTestingMobileNotifications
     }
 
@@ -1277,9 +1317,15 @@ final class SettingsViewController: NSViewController {
                 self.mobileStatusOverride = ("Connected", .systemGreen, "Test notification sent")
             case .failure(let error):
                 self.mobileStatusOverride = ("Test Failed", .systemRed, error.localizedDescription)
+                self.showAlert(title: "Bark Test Failed", message: error.localizedDescription)
             }
             self.refreshMobileNotifications()
         }
+    }
+
+    @objc private func pasteBarkURL() {
+        barkURLField.pasteFromClipboard()
+        view.window?.makeFirstResponder(barkURLField)
     }
 
     @objc private func disconnectMobileNotifications() {
@@ -1836,6 +1882,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastWidgetSnapshot: CodexUsageSnapshot?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        setupMainMenu()
         setupWindow()
         setupMenuBar()
         setupServer()
@@ -1843,6 +1890,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         applyConfig()
         setupUsageRefresh()
         showSettings()
+    }
+
+    private func setupMainMenu() {
+        let mainMenu = NSMenu()
+        let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
+        NSApp.mainMenu = mainMenu
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -1869,7 +1930,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsController = controller
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 340, height: 332),
+            contentRect: NSRect(x: 0, y: 0, width: 388, height: 332),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
