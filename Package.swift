@@ -16,6 +16,7 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("Network"),
+                .linkedFramework("Security"),
                 .linkedFramework("WidgetKit")
             ]
         )

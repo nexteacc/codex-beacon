@@ -14,6 +14,7 @@
 		100000000000000000000005 /* CodexBeaconWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000105 /* CodexBeaconWidget.swift */; };
 		100000000000000000000006 /* CodexBeaconWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 100000000000000000000202 /* CodexBeaconWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		100000000000000000000007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000109 /* Assets.xcassets */; };
+		100000000000000000000008 /* MobileNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10000000000000000000010A /* MobileNotifications.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -50,6 +51,7 @@
 		100000000000000000000107 /* CodexBeaconWidget.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Widget/CodexBeaconWidget.entitlements; sourceTree = "<group>"; };
 		100000000000000000000108 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		100000000000000000000109 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Widget/Assets.xcassets; sourceTree = "<group>"; };
+		10000000000000000000010A /* MobileNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/CodexBeacon/MobileNotifications.swift; sourceTree = "<group>"; };
 		100000000000000000000201 /* Codex Beacon.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Codex Beacon.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		100000000000000000000202 /* CodexBeaconWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = CodexBeaconWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -85,6 +87,7 @@
 			isa = PBXGroup;
 			children = (
 				100000000000000000000101 /* main.swift */,
+				10000000000000000000010A /* MobileNotifications.swift */,
 				100000000000000000000108 /* Info.plist */,
 				100000000000000000000102 /* CodexBeacon.icns */,
 				100000000000000000000103 /* Presets */,
@@ -216,6 +219,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				100000000000000000000001 /* main.swift in Sources */,
+				100000000000000000000008 /* MobileNotifications.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -361,7 +365,7 @@
 				INFOPLIST_FILE = Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				OTHER_LDFLAGS = "$(inherited) -framework AppKit -framework Network";
+				OTHER_LDFLAGS = "$(inherited) -framework AppKit -framework Network -framework Security";
 				PRODUCT_BUNDLE_IDENTIFIER = com.codexbeacon.native;
 				PRODUCT_NAME = "Codex Beacon";
 				SWIFT_VERSION = 5.0;
@@ -378,7 +382,7 @@
 				INFOPLIST_FILE = Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				OTHER_LDFLAGS = "$(inherited) -framework AppKit -framework Network";
+				OTHER_LDFLAGS = "$(inherited) -framework AppKit -framework Network -framework Security";
 				PRODUCT_BUNDLE_IDENTIFIER = com.codexbeacon.native;
 				PRODUCT_NAME = "Codex Beacon";
 				SWIFT_VERSION = 5.0;

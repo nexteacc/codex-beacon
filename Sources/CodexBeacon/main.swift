@@ -413,15 +413,17 @@ struct CodexUsageSnapshot: Codable, Equatable {
     let primary: CodexUsageWindow
     let secondary: CodexUsageWindow?
 
-    func display(for selection: UsageWindowSelection) -> CodexUsageDisplay? {
-        let window: CodexUsageWindow?
+    func window(for selection: UsageWindowSelection) -> CodexUsageWindow? {
         switch selection {
         case .fiveHour:
-            window = primary
+            return primary
         case .weekly:
-            window = secondary
+            return secondary
         }
-        guard let window else { return nil }
+    }
+
+    func display(for selection: UsageWindowSelection) -> CodexUsageDisplay? {
+        guard let window = window(for: selection) else { return nil }
 
         if isLimited(window: window, selection: selection) {
             if window.isPastResetGracePeriod {
@@ -452,7 +454,7 @@ struct CodexUsageSnapshot: Codable, Equatable {
         )
     }
 
-    private func isLimited(window: CodexUsageWindow, selection: UsageWindowSelection) -> Bool {
+    func isLimited(window: CodexUsageWindow, selection: UsageWindowSelection) -> Bool {
         if window.remainingPercent <= 0 {
             return true
         }
@@ -1006,18 +1008,36 @@ final class BeaconToggle: NSControl {
 final class SettingsViewController: NSViewController {
     private let configStore: ConfigStore
     private let hookInstaller: HookInstaller
+    private let mobileNotifications: MobileNotificationsManager
+    private let usageSnapshotProvider: () -> CodexUsageSnapshot?
     private let onChange: () -> Void
     private let touchBarSwitch = BeaconToggle()
     private let soundSwitch = BeaconToggle()
     private let usageControl = NSSegmentedControl(labels: ["5h", "Weekly"], trackingMode: .selectOne, target: nil, action: nil)
     private let hooksButton = NSButton(title: "Install Hooks", target: nil, action: nil)
+    private let mobileStatusDot = StatusDotView()
+    private let mobileStatusLabel = NSTextField(labelWithString: "Not Configured")
+    private let barkURLField = NSSecureTextField(string: "")
+    private let testNotificationButton = NSButton(title: "Test", target: nil, action: nil)
+    private let disconnectButton = NSButton(title: "Disconnect", target: nil, action: nil)
     private let serverDot = StatusDotView()
     private var isServerReady = false
+    private var isTestingMobileNotifications = false
+    private var mobileStatusOverride: (text: String, color: NSColor, detail: String?)?
 
-    init(configStore: ConfigStore, hookInstaller: HookInstaller, isServerReady: Bool, onChange: @escaping () -> Void) {
+    init(
+        configStore: ConfigStore,
+        hookInstaller: HookInstaller,
+        mobileNotifications: MobileNotificationsManager,
+        isServerReady: Bool,
+        usageSnapshotProvider: @escaping () -> CodexUsageSnapshot?,
+        onChange: @escaping () -> Void
+    ) {
         self.configStore = configStore
         self.hookInstaller = hookInstaller
+        self.mobileNotifications = mobileNotifications
         self.isServerReady = isServerReady
+        self.usageSnapshotProvider = usageSnapshotProvider
         self.onChange = onChange
         super.init(nibName: nil, bundle: nil)
     }
@@ -1027,7 +1047,7 @@ final class SettingsViewController: NSViewController {
     }
 
     override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 176))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 260))
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
@@ -1035,13 +1055,15 @@ final class SettingsViewController: NSViewController {
         let soundRow = row(title: "Sound", control: soundSwitch)
         let usageRow = row(title: "Usage", control: usageControl)
         let hooksRow = hookRow()
+        let mobileStatusRow = row(title: "iPhone", control: mobileStatusControl())
+        let barkURLRow = row(title: "Bark URL", control: barkURLControl())
 
         usageControl.segmentStyle = .rounded
         usageControl.controlSize = .small
         usageControl.setWidth(56, forSegment: 0)
         usageControl.setWidth(78, forSegment: 1)
 
-        let stack = NSStackView(views: [touchBarRow, soundRow, usageRow, hooksRow])
+        let stack = NSStackView(views: [touchBarRow, soundRow, usageRow, hooksRow, mobileStatusRow, barkURLRow])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 13
@@ -1069,6 +1091,10 @@ final class SettingsViewController: NSViewController {
         usageControl.action = #selector(usageChanged)
         hooksButton.target = self
         hooksButton.action = #selector(installHooks)
+        testNotificationButton.target = self
+        testNotificationButton.action = #selector(testMobileNotification)
+        disconnectButton.target = self
+        disconnectButton.action = #selector(disconnectMobileNotifications)
 
         self.view = root
         refresh()
@@ -1080,6 +1106,7 @@ final class SettingsViewController: NSViewController {
         usageControl.selectedSegment = configStore.config.selectedUsageWindow == .fiveHour ? 0 : 1
         serverDot.setColor(isServerReady ? .systemGreen : .systemRed, tooltip: isServerReady ? "Ready" : "Port busy")
         refreshHooks()
+        refreshMobileNotifications()
     }
 
     func setServerReady(_ ready: Bool) {
@@ -1121,6 +1148,66 @@ final class SettingsViewController: NSViewController {
         label.widthAnchor.constraint(equalToConstant: 92).isActive = true
         hooksButton.widthAnchor.constraint(equalToConstant: 76).isActive = true
         return row
+    }
+
+    private func mobileStatusControl() -> NSView {
+        mobileStatusLabel.font = NSFont.systemFont(ofSize: 12)
+        mobileStatusLabel.lineBreakMode = .byTruncatingTail
+
+        disconnectButton.bezelStyle = .rounded
+        disconnectButton.controlSize = .small
+        disconnectButton.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+
+        let status = NSStackView(views: [mobileStatusDot, mobileStatusLabel])
+        status.orientation = .horizontal
+        status.alignment = .centerY
+        status.spacing = 7
+
+        let control = NSStackView(views: [status, disconnectButton])
+        control.orientation = .horizontal
+        control.alignment = .centerY
+        control.distribution = .gravityAreas
+        control.spacing = 8
+        return control
+    }
+
+    private func barkURLControl() -> NSView {
+        barkURLField.placeholderString = "Paste from Bark"
+        barkURLField.controlSize = .small
+        barkURLField.font = NSFont.systemFont(ofSize: 12)
+
+        testNotificationButton.bezelStyle = .rounded
+        testNotificationButton.controlSize = .small
+        testNotificationButton.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        testNotificationButton.widthAnchor.constraint(equalToConstant: 48).isActive = true
+
+        let control = NSStackView(views: [barkURLField, testNotificationButton])
+        control.orientation = .horizontal
+        control.alignment = .centerY
+        control.spacing = 8
+        return control
+    }
+
+    private func refreshMobileNotifications() {
+        let configured = mobileNotifications.isConfigured
+        if isTestingMobileNotifications {
+            mobileStatusLabel.stringValue = "Testing"
+            mobileStatusDot.setColor(.systemOrange, tooltip: "Sending a test notification")
+        } else if let mobileStatusOverride {
+            mobileStatusLabel.stringValue = mobileStatusOverride.text
+            mobileStatusDot.setColor(mobileStatusOverride.color, tooltip: mobileStatusOverride.detail ?? mobileStatusOverride.text)
+        } else if configured {
+            mobileStatusLabel.stringValue = "Configured"
+            mobileStatusDot.setColor(.systemGreen, tooltip: "Bark notifications configured")
+        } else {
+            mobileStatusLabel.stringValue = "Not Configured"
+            mobileStatusDot.setColor(.systemGray, tooltip: "Paste a Bark URL and test it")
+        }
+
+        disconnectButton.isHidden = !configured
+        disconnectButton.isEnabled = configured && !isTestingMobileNotifications
+        barkURLField.isEnabled = !isTestingMobileNotifications
+        testNotificationButton.isEnabled = !isTestingMobileNotifications
     }
 
     private func refreshHooks() {
@@ -1169,6 +1256,41 @@ final class SettingsViewController: NSViewController {
         } catch {
             refreshHooks()
             showAlert(title: "Setup Needed", message: error.localizedDescription)
+        }
+    }
+
+    @objc private func testMobileNotification() {
+        isTestingMobileNotifications = true
+        mobileStatusOverride = nil
+        refreshMobileNotifications()
+
+        let value = barkURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        mobileNotifications.test(
+            urlString: value.isEmpty ? nil : value,
+            snapshot: usageSnapshotProvider()
+        ) { [weak self] result in
+            guard let self else { return }
+            self.isTestingMobileNotifications = false
+            switch result {
+            case .success:
+                self.barkURLField.stringValue = ""
+                self.mobileStatusOverride = ("Connected", .systemGreen, "Test notification sent")
+            case .failure(let error):
+                self.mobileStatusOverride = ("Test Failed", .systemRed, error.localizedDescription)
+            }
+            self.refreshMobileNotifications()
+        }
+    }
+
+    @objc private func disconnectMobileNotifications() {
+        do {
+            try mobileNotifications.disconnect()
+            barkURLField.stringValue = ""
+            mobileStatusOverride = nil
+            refreshMobileNotifications()
+        } catch {
+            mobileStatusOverride = ("Disconnect Failed", .systemRed, error.localizedDescription)
+            refreshMobileNotifications()
         }
     }
 
@@ -1686,6 +1808,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let configStore = ConfigStore()
     private let hookInstaller = HookInstaller()
     private let usageMonitor = CodexUsageMonitor()
+    private lazy var mobileNotifications = MobileNotificationsManager(appSupportDirectory: configStore.directoryURL)
     private lazy var presetStore = PresetStore(appSupportDirectory: configStore.directoryURL)
     private lazy var touchBarBeacon = TouchBarBeacon(
         onCodexTap: { [weak self] in
@@ -1732,13 +1855,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupWindow() {
-        let controller = SettingsViewController(configStore: configStore, hookInstaller: hookInstaller, isServerReady: isServerReady) { [weak self] in
+        let controller = SettingsViewController(
+            configStore: configStore,
+            hookInstaller: hookInstaller,
+            mobileNotifications: mobileNotifications,
+            isServerReady: isServerReady,
+            usageSnapshotProvider: { [weak self] in
+                self?.usageMonitor.cachedSnapshot()
+            }
+        ) { [weak self] in
             self?.applyConfig()
         }
         settingsController = controller
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 340, height: 252),
+            contentRect: NSRect(x: 0, y: 0, width: 340, height: 332),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -1891,6 +2022,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         playRecoverySound: Bool,
         publishWidgetUpdate: Bool
     ) {
+        if let snapshot {
+            mobileNotifications.process(snapshot: snapshot)
+        }
+
         guard let usageDisplay = snapshot?.display(for: selection) else {
             clearUsageDisplay()
             publishWidgetSnapshotIfNeeded(snapshot, enabled: publishWidgetUpdate)

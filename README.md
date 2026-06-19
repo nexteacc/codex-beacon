@@ -8,6 +8,7 @@ Codex Beacon is a small local-first macOS menu bar app for Codex signals: Touch 
 - macOS 14 or later for the Widget.
 - A Mac with Touch Bar is only required for Touch Bar visuals; other Macs can use the menu bar app and Widget.
 - Codex CLI or Codex Desktop with hooks support.
+- Bark on iPhone for optional mobile usage notifications.
 - Codex Beacon must be installed in `/Applications`.
 - Codex Beacon runs on your Mac and receives Codex signals locally.
 
@@ -19,6 +20,14 @@ Codex Beacon is a small local-first macOS menu bar app for Codex signals: Touch 
 4. Open `Codex Beacon`.
 5. Click `Install` for hooks.
 6. Restart Codex and trust the hooks when prompted.
+
+## iPhone Notifications
+
+1. Install Bark on the iPhone and copy its personal push URL.
+2. Open Codex Beacon settings and paste the URL into `Bark URL`.
+3. Click `Test` and confirm the notification arrives.
+
+The Bark device key is stored in macOS Keychain. Codex Beacon sends one notification when either the 5-hour or weekly allowance first reaches 50%, 10%, exhausted, or available again. Thresholds are recorded once per usage window to avoid duplicate notifications.
 
 ## First Launch
 
