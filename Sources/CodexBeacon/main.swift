@@ -11,13 +11,15 @@ struct BeaconConfig: Codable, Equatable {
     var activePreset: String?
     var authToken: String?
     var usageWindow: UsageWindowSelection?
+    var menuBarUsage: Bool?
 
     static let `default` = BeaconConfig(
         touchBarVisual: true,
         sound: true,
         activePreset: "default",
         authToken: nil,
-        usageWindow: .fiveHour
+        usageWindow: .fiveHour,
+        menuBarUsage: true
     )
 
     var presetName: String {
@@ -26,6 +28,10 @@ struct BeaconConfig: Codable, Equatable {
 
     var selectedUsageWindow: UsageWindowSelection {
         usageWindow ?? .fiveHour
+    }
+
+    var showsMenuBarUsage: Bool {
+        menuBarUsage ?? true
     }
 }
 
@@ -85,6 +91,11 @@ final class ConfigStore {
 
     func setUsageWindow(_ selection: UsageWindowSelection) {
         config.usageWindow = selection
+        try? save()
+    }
+
+    func setMenuBarUsage(_ enabled: Bool) {
+        config.menuBarUsage = enabled
         try? save()
     }
 
@@ -988,6 +999,7 @@ final class SettingsViewController: NSViewController {
     private let onChange: () -> Void
     private let touchBarSwitch = BeaconSwitch()
     private let soundSwitch = BeaconSwitch()
+    private let menuBarSwitch = BeaconSwitch()
     private let usageControl = NSSegmentedControl(labels: ["5 Hours", "Weekly"], trackingMode: .selectOne, target: nil, action: nil)
     private let hooksButton = NSButton(title: "Install Hooks", target: nil, action: nil)
     private let hooksStatusDot = StatusDotView()
@@ -1024,7 +1036,7 @@ final class SettingsViewController: NSViewController {
     }
 
     override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 440, height: 300))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 440, height: 340))
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
@@ -1035,6 +1047,7 @@ final class SettingsViewController: NSViewController {
         let settingsGrid = grid(rows: [
             [rowLabel("Touch Bar"), touchBarSwitch],
             [rowLabel("Sounds"), soundSwitch],
+            [rowLabel("Menu Bar"), menuBarSwitch],
             [rowLabel("Usage"), usageControl]
         ])
 
@@ -1066,6 +1079,8 @@ final class SettingsViewController: NSViewController {
         touchBarSwitch.action = #selector(touchBarChanged)
         soundSwitch.target = self
         soundSwitch.action = #selector(soundChanged)
+        menuBarSwitch.target = self
+        menuBarSwitch.action = #selector(menuBarChanged)
         usageControl.target = self
         usageControl.action = #selector(usageChanged)
         hooksButton.target = self
@@ -1082,6 +1097,7 @@ final class SettingsViewController: NSViewController {
     func refresh() {
         touchBarSwitch.state = configStore.config.touchBarVisual ? .on : .off
         soundSwitch.state = configStore.config.sound ? .on : .off
+        menuBarSwitch.state = configStore.config.showsMenuBarUsage ? .on : .off
         usageControl.selectedSegment = configStore.config.selectedUsageWindow == .fiveHour ? 0 : 1
         refreshHooks()
         refreshMobileNotifications()
@@ -1250,6 +1266,11 @@ final class SettingsViewController: NSViewController {
 
     @objc private func soundChanged() {
         configStore.setSound(soundSwitch.state == .on)
+        onChange()
+    }
+
+    @objc private func menuBarChanged() {
+        configStore.setMenuBarUsage(menuBarSwitch.state == .on)
         onChange()
     }
 
@@ -1904,7 +1925,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsController = controller
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 300),
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 340),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -1968,7 +1989,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         touchBarBeacon.setStyle(idleStyle)
         refreshUsageDisplay()
         touchBarBeacon.setEnabled(configStore.config.touchBarVisual)
-        statusItem?.button?.title = idleStyle.resolvedMenuIcon
+        refreshStatusItem(snapshot: usageMonitor.cachedSnapshot(), style: idleStyle)
     }
 
     private func refreshMenu() {
@@ -1996,7 +2017,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSSound(named: NSSound.Name(sound))?.play()
         }
 
-        statusItem?.button?.title = style.resolvedMenuIcon
+        refreshStatusItem(snapshot: usageMonitor.cachedSnapshot(), style: style)
 
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -2009,7 +2030,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if self.configStore.config.touchBarVisual {
                 self.touchBarBeacon.present()
             }
-            self.statusItem?.button?.title = idleStyle.resolvedMenuIcon
+            self.refreshStatusItem(snapshot: self.usageMonitor.cachedSnapshot(), style: idleStyle)
         }
         resetWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: workItem)
@@ -2089,6 +2110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         touchBarBeacon.setUsage(usageDisplay, pulse: shouldPulse)
+        refreshStatusItem(snapshot: snapshot)
         publishWidgetSnapshotIfNeeded(snapshot, enabled: publishWidgetUpdate)
 
         if playRecoverySound && usageDisplay.isReady && configStore.config.sound {
@@ -2100,6 +2122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if currentState == .idle {
             touchBarBeacon.setUsage(nil)
         }
+        refreshStatusItem(snapshot: usageMonitor.cachedSnapshot())
         limitedUsagePulseKey = nil
         readyUsagePulseKey = nil
         cancelUsageRecovery()
@@ -2113,6 +2136,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if #available(macOS 14.0, *) {
             WidgetCenter.shared.reloadTimelines(ofKind: "CodexUsageWidget")
         }
+    }
+
+    private func refreshStatusItem(
+        snapshot: CodexUsageSnapshot?,
+        style: BeaconStateStyle? = nil
+    ) {
+        guard let button = statusItem?.button else { return }
+        let resolvedStyle = style ?? presetStore.preset.style(for: currentState)
+
+        guard configStore.config.showsMenuBarUsage else {
+            button.image = nil
+            button.imagePosition = .noImage
+            button.title = resolvedStyle.resolvedMenuIcon
+            button.toolTip = "Codex Beacon"
+            return
+        }
+
+        button.image = nil
+        button.imagePosition = .noImage
+        let usageIcon = presetStore.preset.style(for: .idle).resolvedMenuIcon
+
+        let selection = configStore.config.selectedUsageWindow
+        guard let window = snapshot?.window(for: selection) else {
+            button.title = "\(usageIcon) —"
+            button.toolTip = "Codex usage unavailable"
+            return
+        }
+
+        button.title = "\(usageIcon) \(Int(window.remainingPercent.rounded()))%"
+        button.toolTip = "\(window.label) · resets \(window.resetDisplayText)"
     }
 
     private func scheduleUsageRecovery(for display: CodexUsageDisplay) {
