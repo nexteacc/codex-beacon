@@ -3,6 +3,7 @@ import Foundation
 import Network
 import ObjectiveC
 import QuartzCore
+import UniformTypeIdentifiers
 import WidgetKit
 
 struct BeaconConfig: Codable, Equatable {
@@ -12,6 +13,7 @@ struct BeaconConfig: Codable, Equatable {
     var authToken: String?
     var usageWindow: UsageWindowSelection?
     var menuBarUsage: Bool?
+    var stateAnimations: [String: String]?
 
     static let `default` = BeaconConfig(
         touchBarVisual: true,
@@ -19,7 +21,8 @@ struct BeaconConfig: Codable, Equatable {
         activePreset: "default",
         authToken: nil,
         usageWindow: .fiveHour,
-        menuBarUsage: true
+        menuBarUsage: true,
+        stateAnimations: nil
     )
 
     var presetName: String {
@@ -97,6 +100,44 @@ final class ConfigStore {
     func setMenuBarUsage(_ enabled: Bool) {
         config.menuBarUsage = enabled
         try? save()
+    }
+
+    func animationSelection(for state: BeaconState) -> String? {
+        if let selections = config.stateAnimations {
+            return selections[state.rawValue]
+        }
+        return state == .done ? "builtin:TaskComplete" : nil
+    }
+
+    func animationURL(for state: BeaconState) -> URL? {
+        guard let selection = animationSelection(for: state) else { return nil }
+        if selection.hasPrefix("builtin:") {
+            let name = String(selection.dropFirst("builtin:".count))
+            return Bundle.main.url(forResource: name, withExtension: "gif")
+        }
+        guard selection.hasPrefix("custom:") else { return nil }
+        let filename = String(selection.dropFirst("custom:".count))
+        return directoryURL.appendingPathComponent("Animations", isDirectory: true).appendingPathComponent(filename)
+    }
+
+    func setAnimation(_ selection: String?, for state: BeaconState) {
+        var selections = config.stateAnimations ?? [BeaconState.done.rawValue: "builtin:TaskComplete"]
+        selections[state.rawValue] = selection
+        if selection == nil {
+            selections.removeValue(forKey: state.rawValue)
+        }
+        config.stateAnimations = selections
+        try? save()
+    }
+
+    func importAnimation(from sourceURL: URL, for state: BeaconState) throws -> String {
+        let animationsDirectory = directoryURL.appendingPathComponent("Animations", isDirectory: true)
+        try FileManager.default.createDirectory(at: animationsDirectory, withIntermediateDirectories: true)
+        let filename = "\(state.rawValue)-\(UUID().uuidString).gif"
+        let destinationURL = animationsDirectory.appendingPathComponent(filename)
+        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+        try Self.secureFile(destinationURL)
+        return "custom:\(filename)"
     }
 
     func reload() {
@@ -991,16 +1032,411 @@ final class PasteableTextField: NSTextField {
     }
 }
 
+final class SettingsAtmosphereView: NSView {
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        let bounds = bounds
+
+        NSGradient(colors: [
+            NSColor(calibratedRed: 0.985, green: 0.972, blue: 0.992, alpha: 1.0),
+            NSColor(calibratedRed: 0.948, green: 0.958, blue: 0.988, alpha: 1.0),
+            NSColor(calibratedRed: 1.000, green: 0.950, blue: 0.934, alpha: 1.0)
+        ])?.draw(in: bounds, angle: -18)
+
+        func glow(center: CGPoint, radius: CGFloat, color: NSColor) {
+            let colors = [
+                color.withAlphaComponent(0.62).cgColor,
+                color.withAlphaComponent(0.0).cgColor
+            ] as CFArray
+            guard let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0.0, 1.0]) else { return }
+            context.drawRadialGradient(
+                gradient,
+                startCenter: center,
+                startRadius: 0,
+                endCenter: center,
+                endRadius: radius,
+                options: [.drawsAfterEndLocation]
+            )
+        }
+
+        glow(
+            center: CGPoint(x: bounds.minX + bounds.width * 0.18, y: bounds.minY + bounds.height * 0.92),
+            radius: bounds.width * 0.38,
+            color: NSColor(calibratedRed: 1.0, green: 0.71, blue: 0.66, alpha: 1.0)
+        )
+        glow(
+            center: CGPoint(x: bounds.minX + bounds.width * 0.88, y: bounds.minY + bounds.height * 0.86),
+            radius: bounds.width * 0.44,
+            color: NSColor(calibratedRed: 0.66, green: 0.70, blue: 1.0, alpha: 1.0)
+        )
+        glow(
+            center: CGPoint(x: bounds.minX + bounds.width * 0.52, y: bounds.minY + bounds.height * 0.45),
+            radius: bounds.width * 0.24,
+            color: NSColor(calibratedRed: 1.0, green: 0.87, blue: 0.93, alpha: 1.0)
+        )
+
+        context.setStrokeColor(NSColor.white.withAlphaComponent(0.28).cgColor)
+        context.setLineWidth(1)
+        for offset in stride(from: -bounds.height, through: bounds.width, by: 86) {
+            context.move(to: CGPoint(x: offset, y: bounds.maxY))
+            context.addLine(to: CGPoint(x: offset + bounds.height, y: bounds.minY))
+            context.strokePath()
+        }
+    }
+}
+
+final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+final class AnimationChoiceView: NSView {
+    let selection: String?
+    private let imageView = NSImageView()
+    private let checkBadge = NSView()
+    private let checkView = NSImageView()
+    private let dashedBorderLayer = CAShapeLayer()
+    private var trackingArea: NSTrackingArea?
+    private var isHovered = false
+    private let isImport: Bool
+
+    var onClick: (() -> Void)?
+
+    init(selection: String?, imageURL: URL?, isImport: Bool = false) {
+        self.selection = selection
+        self.isImport = isImport
+        super.init(frame: NSRect(x: 0, y: 0, width: 128, height: 118))
+        wantsLayer = true
+        layer?.cornerRadius = 15
+        layer?.borderWidth = 1
+        layer?.masksToBounds = false
+        layer?.shadowColor = NSColor(calibratedWhite: 0.45, alpha: 1).cgColor
+        layer?.shadowOpacity = 0.06
+        layer?.shadowRadius = 16
+        layer?.shadowOffset = CGSize(width: 0, height: -5)
+
+        dashedBorderLayer.fillColor = NSColor.clear.cgColor
+        dashedBorderLayer.lineWidth = 1
+        dashedBorderLayer.lineDashPattern = [7, 7]
+        dashedBorderLayer.isHidden = true
+        layer?.addSublayer(dashedBorderLayer)
+
+        imageView.image = isImport
+            ? NSImage(systemSymbolName: "plus", accessibilityDescription: "Import GIF")
+            : imageURL.flatMap(NSImage.init(contentsOf:))
+        imageView.animates = !isImport
+        imageView.imageScaling = .scaleProportionallyDown
+        imageView.contentTintColor = isImport ? NSColor.labelColor.withAlphaComponent(0.52) : nil
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(imageView)
+
+        checkBadge.wantsLayer = true
+        checkBadge.layer?.cornerRadius = 14
+        checkBadge.layer?.backgroundColor = NSColor(calibratedWhite: 0.16, alpha: 1).cgColor
+        checkBadge.layer?.shadowColor = NSColor.black.cgColor
+        checkBadge.layer?.shadowOpacity = 0.12
+        checkBadge.layer?.shadowRadius = 7
+        checkBadge.layer?.shadowOffset = CGSize(width: 0, height: -2)
+        checkBadge.translatesAutoresizingMaskIntoConstraints = false
+        checkBadge.isHidden = true
+        addSubview(checkBadge)
+
+        checkView.image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: "Selected")
+        checkView.contentTintColor = .white
+        checkView.translatesAutoresizingMaskIntoConstraints = false
+        checkBadge.addSubview(checkView)
+
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 128),
+            heightAnchor.constraint(equalToConstant: 118),
+            imageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: isImport ? 42 : 13),
+            imageView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: isImport ? -42 : -13),
+            imageView.topAnchor.constraint(equalTo: topAnchor, constant: isImport ? 33 : 12),
+            imageView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: isImport ? -33 : -12),
+            checkBadge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            checkBadge.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            checkBadge.widthAnchor.constraint(equalToConstant: 28),
+            checkBadge.heightAnchor.constraint(equalToConstant: 28),
+            checkView.centerXAnchor.constraint(equalTo: checkBadge.centerXAnchor),
+            checkView.centerYAnchor.constraint(equalTo: checkBadge.centerYAnchor),
+            checkView.widthAnchor.constraint(equalToConstant: 15),
+            checkView.heightAnchor.constraint(equalToConstant: 15)
+        ])
+        updateAppearance(selected: false)
+        toolTip = isImport ? "Import GIF" : "Select animation"
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        let inset: CGFloat = dashedBorderLayer.lineWidth / 2
+        dashedBorderLayer.frame = bounds
+        dashedBorderLayer.path = CGPath(
+            roundedRect: bounds.insetBy(dx: inset, dy: inset),
+            cornerWidth: 15,
+            cornerHeight: 15,
+            transform: nil
+        )
+    }
+
+    override func updateLayer() {
+        super.updateLayer()
+        refreshBorder()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let next = NSTrackingArea(rect: bounds, options: [.activeInKeyWindow, .mouseEnteredAndExited], owner: self)
+        addTrackingArea(next)
+        trackingArea = next
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        refreshBorder()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        refreshBorder()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onClick?()
+    }
+
+    func updateAppearance(selected: Bool) {
+        checkBadge.isHidden = !selected
+        layer?.borderWidth = selected ? 1.6 : 1
+        refreshBorder(selected: selected)
+    }
+
+    private func refreshBorder(selected: Bool? = nil) {
+        let isSelected = selected ?? !checkBadge.isHidden
+        if isImport {
+            layer?.backgroundColor = NSColor.clear.cgColor
+            layer?.borderWidth = 0
+            dashedBorderLayer.isHidden = false
+            dashedBorderLayer.strokeColor = (isHovered
+                ? NSColor.labelColor.withAlphaComponent(0.34)
+                : NSColor.labelColor.withAlphaComponent(0.18)).cgColor
+            return
+        }
+
+        dashedBorderLayer.isHidden = true
+        layer?.borderWidth = isSelected ? 1.6 : 1
+        layer?.backgroundColor = (isHovered
+            ? NSColor.white.withAlphaComponent(0.62)
+            : NSColor.white.withAlphaComponent(0.38)).cgColor
+        layer?.borderColor = isSelected
+            ? NSColor(calibratedWhite: 0.14, alpha: 0.92).cgColor
+            : (isHovered
+                ? NSColor.white.withAlphaComponent(0.84)
+                : NSColor(calibratedWhite: 0.72, alpha: 0.28)).cgColor
+    }
+}
+
+final class SidebarNavigationButton: NSControl {
+    private let iconView = NSImageView()
+    private let titleField: NSTextField
+    private var trackingArea: NSTrackingArea?
+    private var isHovered = false
+    var isSelected = false {
+        didSet { updateAppearance() }
+    }
+
+    init(title: String, symbolName: String) {
+        titleField = NSTextField(labelWithString: title)
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 10
+
+        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: title)
+        image?.isTemplate = true
+        iconView.image = image
+        iconView.imageScaling = .scaleProportionallyDown
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(iconView)
+
+        titleField.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        titleField.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(titleField)
+
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 42),
+            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 20),
+            iconView.heightAnchor.constraint(equalToConstant: 20),
+            titleField.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 10),
+            titleField.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
+            titleField.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+        setAccessibilityLabel(title)
+        updateAppearance()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let next = NSTrackingArea(rect: bounds, options: [.activeInKeyWindow, .mouseEnteredAndExited], owner: self)
+        addTrackingArea(next)
+        trackingArea = next
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        updateAppearance()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        updateAppearance()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        sendAction(action, to: target)
+    }
+
+    func iconFrame(relativeTo view: NSView) -> NSRect {
+        iconView.convert(iconView.bounds, to: view)
+    }
+
+    private func updateAppearance() {
+        let foreground = NSColor.labelColor
+        layer?.backgroundColor = isSelected
+            ? NSColor.white.withAlphaComponent(0.82).cgColor
+            : (isHovered ? NSColor.white.withAlphaComponent(0.42).cgColor : NSColor.clear.cgColor)
+        iconView.contentTintColor = foreground.withAlphaComponent(isSelected ? 0.94 : 0.66)
+        titleField.textColor = foreground.withAlphaComponent(isSelected ? 0.96 : 0.74)
+        titleField.font = NSFont.systemFont(ofSize: 14, weight: isSelected ? .bold : .semibold)
+    }
+}
+
+final class BeaconSegmentedControl: NSControl {
+    private let selectedBackground = NSView()
+    private let labels: [NSTextField]
+    private var selectedLeadingConstraint: NSLayoutConstraint!
+    var selectedSegment = 0 {
+        didSet {
+            guard selectedSegment != oldValue else { return }
+            updateSelection()
+        }
+    }
+
+    init(labels titles: [String]) {
+        precondition(titles.count == 2)
+        labels = titles.map(NSTextField.init(labelWithString:))
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.045).cgColor
+        layer?.borderWidth = 0
+
+        selectedBackground.wantsLayer = true
+        selectedBackground.layer?.cornerRadius = 7
+        selectedBackground.layer?.backgroundColor = NSColor(calibratedWhite: 0.72, alpha: 0.34).cgColor
+        selectedBackground.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(selectedBackground)
+
+        for (index, label) in labels.enumerated() {
+            label.alignment = .center
+            label.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(label)
+
+            let button = NSButton(title: "", target: self, action: #selector(selectSegment(_:)))
+            button.tag = index
+            button.isBordered = false
+            button.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(button)
+
+            NSLayoutConstraint.activate([
+                label.centerYAnchor.constraint(equalTo: centerYAnchor),
+                label.widthAnchor.constraint(equalToConstant: 84),
+                label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: CGFloat(index) * 84),
+                button.topAnchor.constraint(equalTo: topAnchor),
+                button.bottomAnchor.constraint(equalTo: bottomAnchor),
+                button.widthAnchor.constraint(equalToConstant: 84),
+                button.leadingAnchor.constraint(equalTo: leadingAnchor, constant: CGFloat(index) * 84)
+            ])
+        }
+
+        selectedLeadingConstraint = selectedBackground.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2)
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 168),
+            heightAnchor.constraint(equalToConstant: 28),
+            selectedLeadingConstraint,
+            selectedBackground.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            selectedBackground.widthAnchor.constraint(equalToConstant: 82),
+            selectedBackground.heightAnchor.constraint(equalToConstant: 24)
+        ])
+        updateSelection()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func selectSegment(_ sender: NSButton) {
+        selectedSegment = sender.tag
+        sendAction(action, to: target)
+    }
+
+    private func updateSelection() {
+        selectedLeadingConstraint?.constant = selectedSegment == 0 ? 2 : 84
+        for (index, label) in labels.enumerated() {
+            let selected = index == selectedSegment
+            label.font = NSFont.systemFont(ofSize: 12, weight: selected ? .bold : .semibold)
+            label.textColor = selected ? NSColor.labelColor.withAlphaComponent(0.94) : NSColor.labelColor.withAlphaComponent(0.56)
+        }
+        needsLayout = true
+    }
+}
+
 final class SettingsViewController: NSViewController {
+    private enum Page: Int, CaseIterable {
+        case general
+        case animations
+        case connections
+
+        var title: String {
+            switch self {
+            case .general: return "General"
+            case .animations: return "Animations"
+            case .connections: return "Connections"
+            }
+        }
+
+        var symbolName: String {
+            switch self {
+            case .general: return "gearshape"
+            case .animations: return "sparkles.rectangle.stack"
+            case .connections: return "link"
+            }
+        }
+    }
+
     private let configStore: ConfigStore
     private let hookInstaller: HookInstaller
     private let mobileNotifications: MobileNotificationsManager
     private let usageSnapshotProvider: () -> CodexUsageSnapshot?
     private let onChange: () -> Void
+    private let onAnimationPreview: (BeaconState) -> Void
     private let touchBarSwitch = BeaconSwitch()
     private let soundSwitch = BeaconSwitch()
     private let menuBarSwitch = BeaconSwitch()
-    private let usageControl = NSSegmentedControl(labels: ["5 Hours", "Weekly"], trackingMode: .selectOne, target: nil, action: nil)
+    private let usageControl = BeaconSegmentedControl(labels: ["5 Hours", "Weekly"])
     private let hooksButton = NSButton(title: "Install Hooks", target: nil, action: nil)
     private let hooksStatusDot = StatusDotView()
     private let hooksStatusLabel = NSTextField(labelWithString: "Checking")
@@ -1013,6 +1449,14 @@ final class SettingsViewController: NSViewController {
     private var isServerReady = false
     private var isTestingMobileNotifications = false
     private var mobileStatusOverride: (text: String, color: NSColor, detail: String?)?
+    private var animationChoices: [BeaconState: [AnimationChoiceView]] = [:]
+    private var pages: [Page: NSView] = [:]
+    private var navigationButtons: [Page: SidebarNavigationButton] = [:]
+    private var sidebarView: NSView?
+    private var contentHostView: NSView?
+    private var animationSectionViews: [NSView] = []
+    private var animationHeading: NSTextField?
+    private var selectedPage: Page = .animations
 
     init(
         configStore: ConfigStore,
@@ -1020,6 +1464,7 @@ final class SettingsViewController: NSViewController {
         mobileNotifications: MobileNotificationsManager,
         isServerReady: Bool,
         usageSnapshotProvider: @escaping () -> CodexUsageSnapshot?,
+        onAnimationPreview: @escaping (BeaconState) -> Void,
         onChange: @escaping () -> Void
     ) {
         self.configStore = configStore
@@ -1027,6 +1472,7 @@ final class SettingsViewController: NSViewController {
         self.mobileNotifications = mobileNotifications
         self.isServerReady = isServerReady
         self.usageSnapshotProvider = usageSnapshotProvider
+        self.onAnimationPreview = onAnimationPreview
         self.onChange = onChange
         super.init(nibName: nil, bundle: nil)
     }
@@ -1036,43 +1482,62 @@ final class SettingsViewController: NSViewController {
     }
 
     override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 440, height: 340))
+        animationChoices.removeAll()
+        pages.removeAll()
+        navigationButtons.removeAll()
+        animationSectionViews.removeAll()
+        animationHeading = nil
+
+        let root = SettingsAtmosphereView(frame: NSRect(x: 0, y: 0, width: 1100, height: 700))
         root.wantsLayer = true
-        root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        root.layer?.cornerRadius = 18
+        root.layer?.masksToBounds = true
+
+        let windowTitle = NSTextField(labelWithString: "Codex Beacon")
+        windowTitle.font = NSFont.systemFont(ofSize: 16, weight: .semibold)
+        windowTitle.textColor = NSColor.labelColor.withAlphaComponent(0.58)
+        windowTitle.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(windowTitle, positioned: .above, relativeTo: nil)
 
         configureControls()
 
-        let urlRow = barkConnectionRow()
+        let sidebar = makeSidebar()
+        sidebarView = sidebar
+        sidebar.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(sidebar)
 
-        let settingsGrid = grid(rows: [
-            [rowLabel("Touch Bar"), touchBarSwitch],
-            [rowLabel("Sounds"), soundSwitch],
-            [rowLabel("Menu Bar"), menuBarSwitch],
-            [rowLabel("Usage"), usageControl]
-        ])
+        let content = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(content)
+        contentHostView = content
 
-        let connectionsGrid = grid(rows: [
-            [hookStatusControl(), hooksActionsControl()],
-            [mobileStatusControl(), mobileActionsControl()],
-            [rowLabel("Bark Push URL", secondary: true), urlRow]
-        ])
-        barkURLGridRow = connectionsGrid.row(at: 2)
-
-        let divider = NSBox()
-        divider.boxType = .separator
-
-        let stack = NSStackView(views: [settingsGrid, divider, connectionsGrid])
-        stack.orientation = .vertical
-        stack.alignment = .width
-        stack.spacing = 16
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(stack)
+        pages = [
+            .general: makeGeneralPage(),
+            .animations: makeAnimationsPage(),
+            .connections: makeConnectionsPage()
+        ]
+        for pageView in pages.values {
+            pageView.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(pageView)
+            NSLayoutConstraint.activate([
+                pageView.topAnchor.constraint(equalTo: content.topAnchor),
+                pageView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+                pageView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+                pageView.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+            ])
+        }
 
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
-            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 28),
-            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -28),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: root.bottomAnchor, constant: -20)
+            windowTitle.topAnchor.constraint(equalTo: root.topAnchor, constant: 26),
+            windowTitle.centerXAnchor.constraint(equalTo: root.centerXAnchor),
+            sidebar.topAnchor.constraint(equalTo: root.topAnchor),
+            sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            sidebar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            sidebar.widthAnchor.constraint(equalToConstant: 220),
+            content.topAnchor.constraint(equalTo: root.topAnchor),
+            content.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+            content.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            content.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         ])
 
         touchBarSwitch.target = self
@@ -1091,7 +1556,68 @@ final class SettingsViewController: NSViewController {
         mobileMoreButton.action = #selector(showMobileMenu)
 
         self.view = root
+        showPage(selectedPage)
         refresh()
+    }
+
+    func layoutDiagnostics() -> String {
+        view.layoutSubtreeIfNeeded()
+        var lines: [String] = []
+        var failures: [String] = []
+
+        func record(_ name: String, _ frame: NSRect) {
+            lines.append("\(name)=x:\(Int(frame.minX)),y:\(Int(frame.minY)),w:\(Int(frame.width)),h:\(Int(frame.height))")
+        }
+
+        if let sidebarView {
+            let frame = sidebarView.convert(sidebarView.bounds, to: view)
+            record("sidebar", frame)
+            if abs(frame.width - 220) > 1 { failures.append("sidebar width") }
+        }
+        if let contentHostView {
+            let frame = contentHostView.convert(contentHostView.bounds, to: view)
+            record("content", frame)
+            if abs(frame.minX - 220) > 1 { failures.append("content x") }
+        }
+        for page in Page.allCases {
+            guard let button = navigationButtons[page] else {
+                failures.append("navigation \(page.title) missing")
+                continue
+            }
+            let frame = button.convert(button.bounds, to: view)
+            let iconFrame = button.iconFrame(relativeTo: view)
+            record("navigation.\(page.title)", frame)
+            record("navigation.\(page.title).icon", iconFrame)
+            if abs(frame.minX - 20) > 1 || abs(frame.width - 180) > 1 {
+                failures.append("navigation \(page.title) inset")
+            }
+            if iconFrame.minX < frame.minX || iconFrame.maxX > frame.maxX {
+                failures.append("navigation \(page.title) icon")
+            }
+        }
+        if let animationHeading {
+            let frame = animationHeading.convert(animationHeading.bounds, to: view)
+            record("animation.heading", frame)
+            if abs(frame.minX - 257) > 2 { failures.append("heading x") }
+        }
+        for (index, section) in animationSectionViews.enumerated() {
+            let frame = section.convert(section.bounds, to: view)
+            record("animation.section.\(index)", frame)
+            if abs(frame.minX - 257) > 2 { failures.append("section \(index) x") }
+            if abs(frame.width - 806) > 2 { failures.append("section \(index) width") }
+        }
+        for state in [BeaconState.idle, .needsYou, .done] {
+            if let first = animationChoices[state]?.first {
+                let frame = first.convert(first.bounds, to: view)
+                record("animation.choice.\(state.rawValue)", frame)
+                if abs(frame.minX - 257) > 2 { failures.append("choice \(state.rawValue) x") }
+                if abs(frame.width - 128) > 1 || abs(frame.height - 118) > 1 {
+                    failures.append("choice \(state.rawValue) size")
+                }
+            }
+        }
+        lines.append(failures.isEmpty ? "result=passed" : "result=failed:\(failures.joined(separator: ","))")
+        return lines.joined(separator: "\n") + "\n"
     }
 
     func refresh() {
@@ -1101,6 +1627,7 @@ final class SettingsViewController: NSViewController {
         usageControl.selectedSegment = configStore.config.selectedUsageWindow == .fiveHour ? 0 : 1
         refreshHooks()
         refreshMobileNotifications()
+        refreshAnimationChoices()
     }
 
     func setServerReady(_ ready: Bool) {
@@ -1109,11 +1636,6 @@ final class SettingsViewController: NSViewController {
     }
 
     private func configureControls() {
-        usageControl.segmentStyle = .rounded
-        usageControl.controlSize = .small
-        usageControl.setWidth(84, forSegment: 0)
-        usageControl.setWidth(84, forSegment: 1)
-
         [hooksButton, testNotificationButton].forEach {
             $0.bezelStyle = .rounded
             $0.controlSize = .small
@@ -1149,6 +1671,257 @@ final class SettingsViewController: NSViewController {
         return label
     }
 
+    private func makeSidebar() -> NSView {
+        let sidebar = NSView()
+        sidebar.wantsLayer = true
+        sidebar.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.36).cgColor
+
+        let navigation = NSStackView()
+        navigation.orientation = .vertical
+        navigation.alignment = .width
+        navigation.spacing = 11
+        navigation.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(navigation)
+
+        for page in Page.allCases {
+            let button = SidebarNavigationButton(title: page.title, symbolName: page.symbolName)
+            button.target = self
+            button.action = #selector(selectPage(_:))
+            button.tag = page.rawValue
+            navigation.addArrangedSubview(button)
+            button.widthAnchor.constraint(equalTo: navigation.widthAnchor).isActive = true
+            navigationButtons[page] = button
+        }
+
+        NSLayoutConstraint.activate([
+            navigation.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 118),
+            navigation.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 20),
+            navigation.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -20)
+        ])
+        return sidebar
+    }
+
+    private func makeGeneralPage() -> NSView {
+        let settingsGrid = grid(rows: [
+            [rowLabel("Touch Bar"), touchBarSwitch],
+            [rowLabel("Sounds"), soundSwitch],
+            [rowLabel("Menu Bar"), menuBarSwitch],
+            [rowLabel("Usage"), usageControl]
+        ])
+        return makePage(title: "General", content: makeGroup(containing: settingsGrid, height: 208))
+    }
+
+    private func makeConnectionsPage() -> NSView {
+        let urlRow = barkConnectionRow()
+        let connectionsGrid = grid(rows: [
+            [hookStatusControl(), hooksActionsControl()],
+            [mobileStatusControl(), mobileActionsControl()],
+            [rowLabel("Bark Push URL", secondary: true), urlRow]
+        ])
+        barkURLGridRow = connectionsGrid.row(at: 2)
+        return makePage(title: "Connections", content: makeGroup(containing: connectionsGrid, height: 164))
+    }
+
+    private func makeAnimationsPage() -> NSView {
+        let page = NSView()
+
+        let sections = [
+            animationSection(for: .idle),
+            animationSection(for: .needsYou),
+            animationSection(for: .done)
+        ]
+        animationSectionViews = sections
+        sections.forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+            page.addSubview($0)
+        }
+
+        NSLayoutConstraint.activate([
+            sections[0].topAnchor.constraint(equalTo: page.topAnchor, constant: 86),
+            sections[0].leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 37),
+            sections[0].trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -37),
+
+            sections[1].topAnchor.constraint(equalTo: sections[0].bottomAnchor, constant: 10),
+            sections[1].leadingAnchor.constraint(equalTo: sections[0].leadingAnchor),
+            sections[1].trailingAnchor.constraint(equalTo: sections[0].trailingAnchor),
+
+            sections[2].topAnchor.constraint(equalTo: sections[1].bottomAnchor, constant: 10),
+            sections[2].leadingAnchor.constraint(equalTo: sections[0].leadingAnchor),
+            sections[2].trailingAnchor.constraint(equalTo: sections[0].trailingAnchor),
+            sections[2].bottomAnchor.constraint(lessThanOrEqualTo: page.bottomAnchor, constant: -24)
+        ])
+        return page
+    }
+
+    private func makePage(title _: String, content: NSView) -> NSView {
+        let page = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        page.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: page.topAnchor, constant: 88),
+            content.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 37),
+            content.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -37),
+            content.bottomAnchor.constraint(lessThanOrEqualTo: page.bottomAnchor, constant: -36)
+        ])
+        return page
+    }
+
+    private func makeGroup(containing content: NSView, height: CGFloat) -> NSView {
+        let group = NSView()
+        group.wantsLayer = true
+        group.layer?.cornerRadius = 10
+
+        let material = NSVisualEffectView()
+        material.material = .contentBackground
+        material.blendingMode = .withinWindow
+        material.state = .active
+        material.alphaValue = 0.52
+        material.translatesAutoresizingMaskIntoConstraints = false
+        group.addSubview(material)
+
+        content.translatesAutoresizingMaskIntoConstraints = false
+        group.addSubview(content)
+        NSLayoutConstraint.activate([
+            group.heightAnchor.constraint(equalToConstant: height),
+            material.leadingAnchor.constraint(equalTo: group.leadingAnchor),
+            material.trailingAnchor.constraint(equalTo: group.trailingAnchor),
+            material.topAnchor.constraint(equalTo: group.topAnchor),
+            material.bottomAnchor.constraint(equalTo: group.bottomAnchor),
+            content.leadingAnchor.constraint(equalTo: group.leadingAnchor, constant: 20),
+            content.trailingAnchor.constraint(equalTo: group.trailingAnchor, constant: -20),
+            content.centerYAnchor.constraint(equalTo: group.centerYAnchor)
+        ])
+        return group
+    }
+
+    private func animationSection(for state: BeaconState) -> NSView {
+        let section = NSView()
+
+        let label = NSTextField(labelWithString: animationTitle(for: state))
+        label.font = NSFont.systemFont(ofSize: 14, weight: .bold)
+        label.textColor = NSColor.labelColor.withAlphaComponent(0.86)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        section.addSubview(label)
+
+        let divider = NSView()
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.32).cgColor
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        section.addSubview(divider)
+
+        var choices: [AnimationChoiceView] = []
+        let builtIn = AnimationChoiceView(
+            selection: "builtin:TaskComplete",
+            imageURL: Bundle.main.url(forResource: "TaskComplete", withExtension: "gif")
+        )
+        choices.append(builtIn)
+
+        if let selection = configStore.animationSelection(for: state), selection.hasPrefix("custom:") {
+            choices.append(AnimationChoiceView(selection: selection, imageURL: configStore.animationURL(for: state)))
+        }
+
+        let importChoice = AnimationChoiceView(selection: nil, imageURL: nil, isImport: true)
+        choices.append(importChoice)
+        animationChoices[state] = choices
+
+        for choice in choices {
+            choice.onClick = { [weak self, weak choice] in
+                guard let self, let choice else { return }
+                if choice.selection == nil {
+                    self.importAnimation(for: state)
+                } else {
+                    self.toggleAnimation(choice.selection!, for: state)
+                }
+            }
+        }
+
+        let row = NSStackView(views: choices)
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 20
+        row.translatesAutoresizingMaskIntoConstraints = false
+        section.addSubview(row)
+
+        NSLayoutConstraint.activate([
+            section.heightAnchor.constraint(equalToConstant: 166),
+            label.topAnchor.constraint(equalTo: section.topAnchor),
+            label.leadingAnchor.constraint(equalTo: section.leadingAnchor),
+            row.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 12),
+            row.leadingAnchor.constraint(equalTo: section.leadingAnchor),
+            row.heightAnchor.constraint(equalToConstant: 118),
+            divider.leadingAnchor.constraint(equalTo: section.leadingAnchor),
+            divider.trailingAnchor.constraint(equalTo: section.trailingAnchor),
+            divider.bottomAnchor.constraint(equalTo: section.bottomAnchor),
+            divider.heightAnchor.constraint(equalToConstant: 1)
+        ])
+        return section
+    }
+
+    @objc private func selectPage(_ sender: SidebarNavigationButton) {
+        guard let page = Page(rawValue: sender.tag) else { return }
+        selectedPage = page
+        showPage(page)
+    }
+
+    private func showPage(_ page: Page) {
+        for (candidate, pageView) in pages {
+            pageView.isHidden = candidate != page
+        }
+        for (candidate, button) in navigationButtons {
+            button.isSelected = candidate == page
+        }
+    }
+
+    private func animationTitle(for state: BeaconState) -> String {
+        switch state {
+        case .idle: return "Idle"
+        case .needsYou: return "Needs You"
+        case .done: return "Done"
+        }
+    }
+
+    private func refreshAnimationChoices() {
+        for (state, choices) in animationChoices {
+            let selected = configStore.animationSelection(for: state)
+            for choice in choices {
+                choice.updateAppearance(selected: choice.selection != nil && choice.selection == selected)
+            }
+        }
+    }
+
+    private func toggleAnimation(_ selection: String, for state: BeaconState) {
+        let nextSelection = configStore.animationSelection(for: state) == selection ? nil : selection
+        configStore.setAnimation(nextSelection, for: state)
+        refreshAnimationChoices()
+        onChange()
+        if nextSelection != nil {
+            onAnimationPreview(state)
+        }
+    }
+
+    private func importAnimation(for state: BeaconState) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.gif]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "Choose a GIF for \(animationTitle(for: state))"
+        guard panel.runModal() == .OK, let sourceURL = panel.url else { return }
+        do {
+            let selection = try configStore.importAnimation(from: sourceURL, for: state)
+            configStore.setAnimation(selection, for: state)
+            rebuildView()
+            onChange()
+            onAnimationPreview(state)
+        } catch {
+            showAlert(title: "Could Not Import GIF", message: error.localizedDescription)
+        }
+    }
+
+    private func rebuildView() {
+        animationChoices.removeAll()
+        loadView()
+    }
+
     private func hookStatusControl() -> NSView {
         hooksStatusLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
         let status = NSStackView(views: [hooksStatusDot, hooksStatusLabel])
@@ -1176,14 +1949,7 @@ final class SettingsViewController: NSViewController {
     }
 
     private func hooksActionsControl() -> NSView {
-        let menuSlot = NSView()
-        menuSlot.widthAnchor.constraint(equalToConstant: 24).isActive = true
-
-        let actions = NSStackView(views: [hooksButton, menuSlot])
-        actions.orientation = .horizontal
-        actions.alignment = .centerY
-        actions.spacing = 8
-        return actions
+        return hooksButton
     }
 
     private func barkConnectionRow() -> NSView {
@@ -1243,9 +2009,9 @@ final class SettingsViewController: NSViewController {
             hooksButton.isEnabled = true
             hooksButton.isHidden = false
         case .moveToApplications:
-            hooksStatusLabel.stringValue = "Hooks"
+            hooksStatusLabel.stringValue = "Hooks Need App in Applications"
             hooksStatusDot.setColor(.systemOrange, tooltip: state.detail)
-            hooksButton.title = "Move App"
+            hooksButton.title = "Move"
             hooksButton.toolTip = state.detail
             hooksButton.isEnabled = true
             hooksButton.isHidden = false
@@ -1356,8 +2122,11 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
     private let modalItem: NSCustomTouchBarItem
     private let modalTouchBar: NSTouchBar
     private var style = BeaconPreset.default.style(for: .idle)
+    private var state: BeaconState = .idle
+    private var animationURL: URL?
     private var usageDisplay: CodexUsageDisplay?
     private var usageShouldPulse = false
+    private var completionAnimationWorkItem: DispatchWorkItem?
     private var installed = false
     private let onCodexTap: () -> Void
     private let onUsageTap: () -> Void
@@ -1405,10 +2174,29 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
         updateViews()
     }
 
+    func setState(_ nextState: BeaconState, style nextStyle: BeaconStateStyle, animationURL nextAnimationURL: URL?) {
+        state = nextState
+        style = nextStyle
+        animationURL = nextAnimationURL
+        updateViews()
+    }
+
     func setUsage(_ display: CodexUsageDisplay?, pulse: Bool = false) {
         usageDisplay = display
         usageShouldPulse = pulse
         updateViews()
+    }
+
+    func previewAnimation(for previewState: BeaconState, url: URL, duration: TimeInterval = 3.0) {
+        completionAnimationWorkItem?.cancel()
+        modalItem.view = animatedTouchBarView(state: previewState, url: url, usageDisplay: usageDisplay)
+        present()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.updateViews()
+        }
+        completionAnimationWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: workItem)
     }
 
     func present() {
@@ -1452,7 +2240,13 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
     private func updateViews() {
         trayItem.view = statusView(style: style, width: 120, height: 30, fontSize: 13)
         let shouldPulse = usageShouldPulse
-        modalItem.view = fullTouchBarView(style: style, usageDisplay: usageDisplay, pulse: shouldPulse)
+        modalItem.view = fullTouchBarView(
+            state: state,
+            style: style,
+            usageDisplay: usageDisplay,
+            animationURL: animationURL,
+            pulse: shouldPulse
+        )
         usageShouldPulse = false
     }
 
@@ -1497,7 +2291,17 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
         return dlsym(handle, name)
     }
 
-    private func fullTouchBarView(style: BeaconStateStyle, usageDisplay: CodexUsageDisplay?, pulse: Bool) -> NSView {
+    private func fullTouchBarView(
+        state: BeaconState,
+        style: BeaconStateStyle,
+        usageDisplay: CodexUsageDisplay?,
+        animationURL: URL?,
+        pulse: Bool
+    ) -> NSView {
+        if let animationURL {
+            return animatedTouchBarView(state: state, url: animationURL, usageDisplay: usageDisplay)
+        }
+
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 980, height: 36))
         container.wantsLayer = true
         container.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.04).cgColor
@@ -1514,6 +2318,84 @@ final class TouchBarBeacon: NSObject, NSTouchBarDelegate {
             status.heightAnchor.constraint(equalToConstant: 32)
         ])
 
+        return container
+    }
+
+    private func animatedTouchBarView(state: BeaconState, url: URL, usageDisplay: CodexUsageDisplay?) -> NSView {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 980, height: 36))
+        guard let image = NSImage(contentsOf: url) else { return container }
+
+        let content = NSView()
+        content.wantsLayer = true
+        content.layer?.backgroundColor = NSColor(calibratedRed: 0.165, green: 0.129, blue: 0.106, alpha: 1.0).cgColor
+        content.layer?.cornerRadius = 10
+        content.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(content)
+
+        let imageView = NSImageView(image: image)
+        imageView.animates = true
+        imageView.imageScaling = .scaleProportionallyDown
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(imageView)
+
+        var constraints = [
+            content.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            content.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            content.heightAnchor.constraint(equalToConstant: 32),
+            imageView.topAnchor.constraint(equalTo: content.topAnchor, constant: 2),
+            imageView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -2)
+        ]
+
+        switch state {
+        case .idle where usageDisplay != nil:
+            let separator = NSView()
+            separator.wantsLayer = true
+            separator.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.18).cgColor
+            separator.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(separator)
+
+            let usage = NSTextField(labelWithString: usageDisplay!.text)
+            usage.textColor = usageTextColor(for: usageDisplay!)
+            usage.font = NSFont.monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
+            usage.alignment = .right
+            usage.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(usage)
+
+            constraints += [
+                content.widthAnchor.constraint(equalToConstant: 310),
+                imageView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
+                imageView.widthAnchor.constraint(equalToConstant: 104),
+                separator.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 7),
+                separator.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+                separator.widthAnchor.constraint(equalToConstant: 1),
+                separator.heightAnchor.constraint(equalToConstant: 18),
+                usage.leadingAnchor.constraint(equalTo: separator.trailingAnchor, constant: 12),
+                usage.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+                usage.centerYAnchor.constraint(equalTo: content.centerYAnchor)
+            ]
+        case .needsYou:
+            let label = NSTextField(labelWithString: "Needs You")
+            label.textColor = style.foregroundColor
+            label.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
+            label.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(label)
+            constraints += [
+                content.widthAnchor.constraint(equalToConstant: 280),
+                imageView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+                imageView.widthAnchor.constraint(equalToConstant: 160),
+                label.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 10),
+                label.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -12),
+                label.centerYAnchor.constraint(equalTo: content.centerYAnchor)
+            ]
+        default:
+            constraints += [
+                content.widthAnchor.constraint(equalToConstant: 280),
+                imageView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
+                imageView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10)
+            ]
+        }
+
+        NSLayoutConstraint.activate(constraints)
         return container
     }
 
@@ -1885,6 +2767,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         applyConfig()
         setupUsageRefresh()
         showSettings()
+
     }
 
     private func setupMainMenu() {
@@ -1918,6 +2801,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             isServerReady: isServerReady,
             usageSnapshotProvider: { [weak self] in
                 self?.usageMonitor.cachedSnapshot()
+            },
+            onAnimationPreview: { [weak self] state in
+                self?.previewAnimation(for: state)
             }
         ) { [weak self] in
             self?.applyConfig()
@@ -1925,12 +2811,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsController = controller
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 340),
-            styleMask: [.titled, .closable, .miniaturizable],
+            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 700),
+            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = "Codex Beacon"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
         window.contentViewController = controller
         window.center()
@@ -1986,7 +2877,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsController?.refresh()
         refreshMenu()
         let idleStyle = presetStore.preset.style(for: .idle)
-        touchBarBeacon.setStyle(idleStyle)
+        touchBarBeacon.setState(.idle, style: idleStyle, animationURL: configStore.animationURL(for: .idle))
         refreshUsageDisplay()
         touchBarBeacon.setEnabled(configStore.config.touchBarVisual)
         refreshStatusItem(snapshot: usageMonitor.cachedSnapshot(), style: idleStyle)
@@ -2009,7 +2900,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         touchBarBeacon.setUsage(nil)
 
         if configStore.config.touchBarVisual {
-            touchBarBeacon.setStyle(style)
+            touchBarBeacon.setState(state, style: style, animationURL: configStore.animationURL(for: state))
             touchBarBeacon.present()
         }
 
@@ -2025,7 +2916,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.presetStore.reload(activePresetName: self.configStore.config.presetName)
             self.currentState = .idle
             let idleStyle = self.presetStore.preset.style(for: .idle)
-            self.touchBarBeacon.setStyle(idleStyle)
+            self.touchBarBeacon.setState(.idle, style: idleStyle, animationURL: self.configStore.animationURL(for: .idle))
             self.refreshUsageDisplay()
             if self.configStore.config.touchBarVisual {
                 self.touchBarBeacon.present()
@@ -2034,6 +2925,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         resetWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: workItem)
+    }
+
+    private func previewAnimation(for state: BeaconState) {
+        configStore.reload()
+        guard configStore.config.touchBarVisual,
+              let url = configStore.animationURL(for: state) else { return }
+        touchBarBeacon.previewAnimation(for: state, url: url)
     }
 
     private func setupUsageRefresh() {
@@ -2325,6 +3223,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 let app = NSApplication.shared
+
+if ProcessInfo.processInfo.arguments.contains("--layout-probe") {
+    let configStore = ConfigStore()
+    let controller = SettingsViewController(
+        configStore: configStore,
+        hookInstaller: HookInstaller(),
+        mobileNotifications: MobileNotificationsManager(appSupportDirectory: configStore.directoryURL),
+        isServerReady: true,
+        usageSnapshotProvider: { nil },
+        onAnimationPreview: { _ in },
+        onChange: {}
+    )
+    let probeWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 1100, height: 700),
+        styleMask: [.titled, .fullSizeContentView],
+        backing: .buffered,
+        defer: false
+    )
+    probeWindow.contentViewController = controller
+    probeWindow.contentView?.layoutSubtreeIfNeeded()
+    let report = controller.layoutDiagnostics()
+    try? report.write(
+        to: URL(fileURLWithPath: "/tmp/codex-beacon-layout-report.txt"),
+        atomically: true,
+        encoding: .utf8
+    )
+    exit(report.contains("result=passed") ? EXIT_SUCCESS : EXIT_FAILURE)
+}
+
 let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)

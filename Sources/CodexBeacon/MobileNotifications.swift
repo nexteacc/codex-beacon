@@ -110,7 +110,7 @@ final class BarkClient {
         request.httpMethod = "POST"
         request.timeoutInterval = 6
         request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-        request.setValue("CodexBeacon/0.6.1", forHTTPHeaderField: "User-Agent")
+        request.setValue("CodexBeacon/0.7", forHTTPHeaderField: "User-Agent")
 
         let payload: [String: Any] = [
             "device_key": deviceKey,
