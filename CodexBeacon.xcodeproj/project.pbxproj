@@ -15,7 +15,6 @@
 		100000000000000000000006 /* CodexBeaconWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 100000000000000000000202 /* CodexBeaconWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		100000000000000000000007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000109 /* Assets.xcassets */; };
 		100000000000000000000008 /* MobileNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10000000000000000000010A /* MobileNotifications.swift */; };
-		100000000000000000000009 /* TaskComplete.gif in Resources */ = {isa = PBXBuildFile; fileRef = 10000000000000000000010B /* TaskComplete.gif */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -53,7 +52,6 @@
 		100000000000000000000108 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		100000000000000000000109 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Widget/Assets.xcassets; sourceTree = "<group>"; };
 		10000000000000000000010A /* MobileNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/CodexBeacon/MobileNotifications.swift; sourceTree = "<group>"; };
-		10000000000000000000010B /* TaskComplete.gif */ = {isa = PBXFileReference; lastKnownFileType = image.gif; path = Resources/TaskComplete.gif; sourceTree = "<group>"; };
 		100000000000000000000201 /* Codex Beacon.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Codex Beacon.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		100000000000000000000202 /* CodexBeaconWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = CodexBeaconWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -94,7 +92,6 @@
 				100000000000000000000102 /* CodexBeacon.icns */,
 				100000000000000000000103 /* Presets */,
 				100000000000000000000104 /* helper */,
-				10000000000000000000010B /* TaskComplete.gif */,
 			);
 			name = App;
 			sourceTree = "<group>";
@@ -203,7 +200,6 @@
 				100000000000000000000002 /* CodexBeacon.icns in Resources */,
 				100000000000000000000003 /* Presets in Resources */,
 				100000000000000000000004 /* helper in Resources */,
-				100000000000000000000009 /* TaskComplete.gif in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

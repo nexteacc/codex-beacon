@@ -103,25 +103,41 @@ final class ConfigStore {
     }
 
     func animationSelection(for state: BeaconState) -> String? {
-        if let selections = config.stateAnimations {
-            return selections[state.rawValue]
-        }
-        return state == .done ? "builtin:TaskComplete" : nil
+        guard let selection = config.stateAnimations?[state.rawValue] else { return nil }
+        return selection == "builtin:TaskComplete" ? nil : selection
     }
 
     func animationURL(for state: BeaconState) -> URL? {
         guard let selection = animationSelection(for: state) else { return nil }
-        if selection.hasPrefix("builtin:") {
-            let name = String(selection.dropFirst("builtin:".count))
-            return Bundle.main.url(forResource: name, withExtension: "gif")
+        return customAnimationURL(for: selection)
+    }
+
+    func animationURL(for selection: String) -> URL? {
+        customAnimationURL(for: selection)
+    }
+
+    func customAnimationSelections(for state: BeaconState) -> [String] {
+        let animationsDirectory = directoryURL.appendingPathComponent("Animations", isDirectory: true)
+        let keys: Set<URLResourceKey> = [.contentModificationDateKey, .isRegularFileKey]
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: animationsDirectory,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        return urls.compactMap { url -> (String, Date)? in
+            guard url.pathExtension.lowercased() == "gif",
+                  url.lastPathComponent.hasPrefix("\(state.rawValue)-"),
+                  let values = try? url.resourceValues(forKeys: keys),
+                  values.isRegularFile == true else { return nil }
+            return ("custom:\(url.lastPathComponent)", values.contentModificationDate ?? .distantPast)
         }
-        guard selection.hasPrefix("custom:") else { return nil }
-        let filename = String(selection.dropFirst("custom:".count))
-        return directoryURL.appendingPathComponent("Animations", isDirectory: true).appendingPathComponent(filename)
+        .sorted { $0.1 > $1.1 }
+        .map(\.0)
     }
 
     func setAnimation(_ selection: String?, for state: BeaconState) {
-        var selections = config.stateAnimations ?? [BeaconState.done.rawValue: "builtin:TaskComplete"]
+        var selections = config.stateAnimations ?? [:]
         selections[state.rawValue] = selection
         if selection == nil {
             selections.removeValue(forKey: state.rawValue)
@@ -137,7 +153,40 @@ final class ConfigStore {
         let destinationURL = animationsDirectory.appendingPathComponent(filename)
         try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
         try Self.secureFile(destinationURL)
-        return "custom:\(filename)"
+        let selection = "custom:\(filename)"
+        let previousAnimations = config.stateAnimations
+
+        var selections = config.stateAnimations ?? [:]
+        selections[state.rawValue] = selection
+        config.stateAnimations = selections
+        do {
+            try save()
+        } catch {
+            config.stateAnimations = previousAnimations
+            try? FileManager.default.removeItem(at: destinationURL)
+            throw error
+        }
+
+        return selection
+    }
+
+    func deleteAnimation(_ selection: String, for state: BeaconState) throws {
+        guard let animationURL = customAnimationURL(for: selection) else { return }
+        let previousAnimations = config.stateAnimations
+        if animationSelection(for: state) == selection {
+            var selections = config.stateAnimations ?? [:]
+            selections.removeValue(forKey: state.rawValue)
+            config.stateAnimations = selections
+            do {
+                try save()
+            } catch {
+                config.stateAnimations = previousAnimations
+                throw error
+            }
+        }
+        if FileManager.default.fileExists(atPath: animationURL.path) {
+            try FileManager.default.removeItem(at: animationURL)
+        }
     }
 
     func reload() {
@@ -155,6 +204,15 @@ final class ConfigStore {
         try data.write(to: fileURL, options: .atomic)
         try Self.secureDirectory(directoryURL)
         try Self.secureFile(fileURL)
+    }
+
+    private func customAnimationURL(for selection: String) -> URL? {
+        guard selection.hasPrefix("custom:") else { return nil }
+        let filename = String(selection.dropFirst("custom:".count))
+        guard !filename.isEmpty, filename == URL(fileURLWithPath: filename).lastPathComponent else { return nil }
+        return directoryURL
+            .appendingPathComponent("Animations", isDirectory: true)
+            .appendingPathComponent(filename)
     }
 
     private static func makeToken() -> String {
@@ -1103,8 +1161,9 @@ final class AnimationChoiceView: NSView {
     private let isImport: Bool
 
     var onClick: (() -> Void)?
+    var onDelete: (() -> Void)?
 
-    init(selection: String?, imageURL: URL?, isImport: Bool = false) {
+    init(selection: String?, imageURL: URL?, isImport: Bool = false, defaultStyle: BeaconStateStyle? = nil) {
         self.selection = selection
         self.isImport = isImport
         super.init(frame: NSRect(x: 0, y: 0, width: 128, height: 118))
@@ -1118,7 +1177,7 @@ final class AnimationChoiceView: NSView {
         layer?.shadowOffset = CGSize(width: 0, height: -5)
 
         dashedBorderLayer.fillColor = NSColor.clear.cgColor
-        dashedBorderLayer.lineWidth = 1
+        dashedBorderLayer.lineWidth = 1.5
         dashedBorderLayer.lineDashPattern = [7, 7]
         dashedBorderLayer.isHidden = true
         layer?.addSublayer(dashedBorderLayer)
@@ -1126,19 +1185,20 @@ final class AnimationChoiceView: NSView {
         imageView.image = isImport
             ? NSImage(systemSymbolName: "plus", accessibilityDescription: "Import GIF")
             : imageURL.flatMap(NSImage.init(contentsOf:))
-        imageView.animates = !isImport
+        imageView.animates = !isImport && imageURL != nil
+        imageView.isHidden = defaultStyle != nil
         imageView.imageScaling = .scaleProportionallyDown
-        imageView.contentTintColor = isImport ? NSColor.labelColor.withAlphaComponent(0.52) : nil
+        imageView.contentTintColor = isImport ? NSColor.labelColor.withAlphaComponent(0.72) : nil
         imageView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(imageView)
 
         checkBadge.wantsLayer = true
-        checkBadge.layer?.cornerRadius = 14
-        checkBadge.layer?.backgroundColor = NSColor(calibratedWhite: 0.16, alpha: 1).cgColor
-        checkBadge.layer?.shadowColor = NSColor.black.cgColor
-        checkBadge.layer?.shadowOpacity = 0.12
-        checkBadge.layer?.shadowRadius = 7
-        checkBadge.layer?.shadowOffset = CGSize(width: 0, height: -2)
+        checkBadge.layer?.cornerRadius = 11
+        checkBadge.layer?.backgroundColor = NSColor.systemGreen.cgColor
+        checkBadge.layer?.shadowColor = NSColor.systemGreen.cgColor
+        checkBadge.layer?.shadowOpacity = 0.18
+        checkBadge.layer?.shadowRadius = 5
+        checkBadge.layer?.shadowOffset = CGSize(width: 0, height: -1)
         checkBadge.translatesAutoresizingMaskIntoConstraints = false
         checkBadge.isHidden = true
         addSubview(checkBadge)
@@ -1147,6 +1207,33 @@ final class AnimationChoiceView: NSView {
         checkView.contentTintColor = .white
         checkView.translatesAutoresizingMaskIntoConstraints = false
         checkBadge.addSubview(checkView)
+
+        if let defaultStyle {
+            let preview = NSView()
+            preview.wantsLayer = true
+            preview.layer?.cornerRadius = 8
+            preview.layer?.backgroundColor = defaultStyle.backgroundColor.cgColor
+            preview.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(preview)
+
+            let label = NSTextField(labelWithString: defaultStyle.text)
+            label.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+            label.textColor = defaultStyle.foregroundColor
+            label.alignment = .center
+            label.lineBreakMode = .byTruncatingTail
+            label.translatesAutoresizingMaskIntoConstraints = false
+            preview.addSubview(label)
+
+            NSLayoutConstraint.activate([
+                preview.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+                preview.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+                preview.centerYAnchor.constraint(equalTo: centerYAnchor),
+                preview.heightAnchor.constraint(equalToConstant: 36),
+                label.leadingAnchor.constraint(equalTo: preview.leadingAnchor, constant: 8),
+                label.trailingAnchor.constraint(equalTo: preview.trailingAnchor, constant: -8),
+                label.centerYAnchor.constraint(equalTo: preview.centerYAnchor)
+            ])
+        }
 
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: 128),
@@ -1157,15 +1244,16 @@ final class AnimationChoiceView: NSView {
             imageView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: isImport ? -33 : -12),
             checkBadge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             checkBadge.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            checkBadge.widthAnchor.constraint(equalToConstant: 28),
-            checkBadge.heightAnchor.constraint(equalToConstant: 28),
+            checkBadge.widthAnchor.constraint(equalToConstant: 22),
+            checkBadge.heightAnchor.constraint(equalToConstant: 22),
             checkView.centerXAnchor.constraint(equalTo: checkBadge.centerXAnchor),
             checkView.centerYAnchor.constraint(equalTo: checkBadge.centerYAnchor),
-            checkView.widthAnchor.constraint(equalToConstant: 15),
-            checkView.heightAnchor.constraint(equalToConstant: 15)
+            checkView.widthAnchor.constraint(equalToConstant: 12),
+            checkView.heightAnchor.constraint(equalToConstant: 12)
         ])
         updateAppearance(selected: false)
-        toolTip = isImport ? "Import GIF" : "Select animation"
+        toolTip = isImport ? "Import GIF" : (selection?.hasPrefix("custom:") == true ? "Select animation. Right-click to delete." : "Use default")
+        setAccessibilityLabel(isImport ? "Import GIF" : (defaultStyle?.text ?? "Custom animation"))
     }
 
     required init?(coder: NSCoder) {
@@ -1208,12 +1296,28 @@ final class AnimationChoiceView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        onClick?()
+        if event.type == .leftMouseDown {
+            onClick?()
+        }
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard selection?.hasPrefix("custom:") == true else { return nil }
+        let menu = NSMenu()
+        let item = NSMenuItem(title: "Delete", action: #selector(deleteAnimation), keyEquivalent: "")
+        item.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "Delete animation")
+        item.target = self
+        menu.addItem(item)
+        return menu
+    }
+
+    @objc private func deleteAnimation() {
+        onDelete?()
     }
 
     func updateAppearance(selected: Bool) {
-        checkBadge.isHidden = !selected
-        layer?.borderWidth = selected ? 1.6 : 1
+        checkBadge.isHidden = !selected || isImport
+        layer?.borderWidth = selected && !isImport ? 1.4 : 1
         refreshBorder(selected: selected)
     }
 
@@ -1224,21 +1328,21 @@ final class AnimationChoiceView: NSView {
             layer?.borderWidth = 0
             dashedBorderLayer.isHidden = false
             dashedBorderLayer.strokeColor = (isHovered
-                ? NSColor.labelColor.withAlphaComponent(0.34)
-                : NSColor.labelColor.withAlphaComponent(0.18)).cgColor
+                ? NSColor.labelColor.withAlphaComponent(0.50)
+                : NSColor.labelColor.withAlphaComponent(0.30)).cgColor
             return
         }
 
         dashedBorderLayer.isHidden = true
-        layer?.borderWidth = isSelected ? 1.6 : 1
+        layer?.borderWidth = isSelected ? 1.4 : 1
         layer?.backgroundColor = (isHovered
-            ? NSColor.white.withAlphaComponent(0.62)
-            : NSColor.white.withAlphaComponent(0.38)).cgColor
+            ? NSColor.controlBackgroundColor.withAlphaComponent(0.82)
+            : NSColor.controlBackgroundColor.withAlphaComponent(0.62)).cgColor
         layer?.borderColor = isSelected
-            ? NSColor(calibratedWhite: 0.14, alpha: 0.92).cgColor
+            ? NSColor.labelColor.withAlphaComponent(0.66).cgColor
             : (isHovered
-                ? NSColor.white.withAlphaComponent(0.84)
-                : NSColor(calibratedWhite: 0.72, alpha: 0.28)).cgColor
+                ? NSColor.separatorColor.withAlphaComponent(0.72)
+                : NSColor.separatorColor.withAlphaComponent(0.46)).cgColor
     }
 }
 
@@ -1316,8 +1420,8 @@ final class SidebarNavigationButton: NSControl {
     private func updateAppearance() {
         let foreground = NSColor.labelColor
         layer?.backgroundColor = isSelected
-            ? NSColor.white.withAlphaComponent(0.82).cgColor
-            : (isHovered ? NSColor.white.withAlphaComponent(0.42).cgColor : NSColor.clear.cgColor)
+            ? NSColor.labelColor.withAlphaComponent(0.14).cgColor
+            : (isHovered ? NSColor.labelColor.withAlphaComponent(0.07).cgColor : NSColor.clear.cgColor)
         iconView.contentTintColor = foreground.withAlphaComponent(isSelected ? 0.94 : 0.66)
         titleField.textColor = foreground.withAlphaComponent(isSelected ? 0.96 : 0.74)
         titleField.font = NSFont.systemFont(ofSize: 14, weight: isSelected ? .bold : .semibold)
@@ -1405,6 +1509,8 @@ final class BeaconSegmentedControl: NSControl {
 }
 
 final class SettingsViewController: NSViewController {
+    private static let maximumAnimationChoicesPerRow = 5
+    private let isLayoutProbe = ProcessInfo.processInfo.arguments.contains("--layout-probe")
     private enum Page: Int, CaseIterable {
         case general
         case animations
@@ -1607,12 +1713,31 @@ final class SettingsViewController: NSViewController {
             if abs(frame.width - 806) > 2 { failures.append("section \(index) width") }
         }
         for state in [BeaconState.idle, .needsYou, .done] {
-            if let first = animationChoices[state]?.first {
+            if let choices = animationChoices[state], let first = choices.first {
                 let frame = first.convert(first.bounds, to: view)
                 record("animation.choice.\(state.rawValue)", frame)
                 if abs(frame.minX - 257) > 2 { failures.append("choice \(state.rawValue) x") }
                 if abs(frame.width - 128) > 1 || abs(frame.height - 118) > 1 {
                     failures.append("choice \(state.rawValue) size")
+                }
+                if first.selection != "default:\(state.rawValue)" {
+                    failures.append("choice \(state.rawValue) default order")
+                }
+                if choices.count > Self.maximumAnimationChoicesPerRow {
+                    failures.append("choice \(state.rawValue) count")
+                }
+                if let section = animationSectionViews.first(where: { section in
+                    section.convert(section.bounds, to: view).minY <= frame.minY
+                        && section.convert(section.bounds, to: view).maxY >= frame.maxY
+                }) {
+                    let sectionFrame = section.convert(section.bounds, to: view)
+                    for choice in choices {
+                        let choiceFrame = choice.convert(choice.bounds, to: view)
+                        if choiceFrame.maxX > sectionFrame.maxX + 1 {
+                            failures.append("choice \(state.rawValue) overflow")
+                            break
+                        }
+                    }
                 }
             }
         }
@@ -1803,25 +1928,30 @@ final class SettingsViewController: NSViewController {
         label.translatesAutoresizingMaskIntoConstraints = false
         section.addSubview(label)
 
-        let divider = NSView()
-        divider.wantsLayer = true
-        divider.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.32).cgColor
-        divider.translatesAutoresizingMaskIntoConstraints = false
-        section.addSubview(divider)
-
         var choices: [AnimationChoiceView] = []
-        let builtIn = AnimationChoiceView(
-            selection: "builtin:TaskComplete",
-            imageURL: Bundle.main.url(forResource: "TaskComplete", withExtension: "gif")
-        )
-        choices.append(builtIn)
+        let defaultSelection = "default:\(state.rawValue)"
+        choices.append(AnimationChoiceView(
+            selection: defaultSelection,
+            imageURL: nil,
+            defaultStyle: BeaconPreset.default.style(for: state)
+        ))
 
-        if let selection = configStore.animationSelection(for: state), selection.hasPrefix("custom:") {
-            choices.append(AnimationChoiceView(selection: selection, imageURL: configStore.animationURL(for: state)))
+        let maximumCustomAnimations = Self.maximumAnimationChoicesPerRow - 2
+        var availableCustomAnimations = configStore.customAnimationSelections(for: state)
+        if let selected = configStore.animationSelection(for: state),
+           let selectedIndex = availableCustomAnimations.firstIndex(of: selected),
+           selectedIndex != 0 {
+            availableCustomAnimations.insert(availableCustomAnimations.remove(at: selectedIndex), at: 0)
+        }
+        let customSelections = Array(availableCustomAnimations.prefix(maximumCustomAnimations))
+        for selection in customSelections {
+            let imageURL = isLayoutProbe ? nil : configStore.animationURL(for: selection)
+            choices.append(AnimationChoiceView(selection: selection, imageURL: imageURL))
         }
 
-        let importChoice = AnimationChoiceView(selection: nil, imageURL: nil, isImport: true)
-        choices.append(importChoice)
+        if choices.count < Self.maximumAnimationChoicesPerRow {
+            choices.append(AnimationChoiceView(selection: nil, imageURL: nil, isImport: true))
+        }
         animationChoices[state] = choices
 
         for choice in choices {
@@ -1829,8 +1959,15 @@ final class SettingsViewController: NSViewController {
                 guard let self, let choice else { return }
                 if choice.selection == nil {
                     self.importAnimation(for: state)
+                } else if choice.selection == defaultSelection {
+                    self.selectDefaultAnimation(for: state)
                 } else {
                     self.toggleAnimation(choice.selection!, for: state)
+                }
+            }
+            if let selection = choice.selection, selection.hasPrefix("custom:") {
+                choice.onDelete = { [weak self] in
+                    self?.deleteAnimation(selection, for: state)
                 }
             }
         }
@@ -1843,16 +1980,12 @@ final class SettingsViewController: NSViewController {
         section.addSubview(row)
 
         NSLayoutConstraint.activate([
-            section.heightAnchor.constraint(equalToConstant: 166),
+            section.heightAnchor.constraint(equalToConstant: 154),
             label.topAnchor.constraint(equalTo: section.topAnchor),
             label.leadingAnchor.constraint(equalTo: section.leadingAnchor),
             row.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 12),
             row.leadingAnchor.constraint(equalTo: section.leadingAnchor),
-            row.heightAnchor.constraint(equalToConstant: 118),
-            divider.leadingAnchor.constraint(equalTo: section.leadingAnchor),
-            divider.trailingAnchor.constraint(equalTo: section.trailingAnchor),
-            divider.bottomAnchor.constraint(equalTo: section.bottomAnchor),
-            divider.heightAnchor.constraint(equalToConstant: 1)
+            row.heightAnchor.constraint(equalToConstant: 118)
         ])
         return section
     }
@@ -1884,9 +2017,17 @@ final class SettingsViewController: NSViewController {
         for (state, choices) in animationChoices {
             let selected = configStore.animationSelection(for: state)
             for choice in choices {
-                choice.updateAppearance(selected: choice.selection != nil && choice.selection == selected)
+                let isDefault = choice.selection == "default:\(state.rawValue)"
+                choice.updateAppearance(selected: isDefault ? selected == nil : choice.selection == selected)
             }
         }
+    }
+
+    private func selectDefaultAnimation(for state: BeaconState) {
+        configStore.setAnimation(nil, for: state)
+        refreshAnimationChoices()
+        onChange()
+        onAnimationPreview(state)
     }
 
     private func toggleAnimation(_ selection: String, for state: BeaconState) {
@@ -1894,9 +2035,7 @@ final class SettingsViewController: NSViewController {
         configStore.setAnimation(nextSelection, for: state)
         refreshAnimationChoices()
         onChange()
-        if nextSelection != nil {
-            onAnimationPreview(state)
-        }
+        onAnimationPreview(state)
     }
 
     private func importAnimation(for state: BeaconState) {
@@ -1907,13 +2046,29 @@ final class SettingsViewController: NSViewController {
         panel.message = "Choose a GIF for \(animationTitle(for: state))"
         guard panel.runModal() == .OK, let sourceURL = panel.url else { return }
         do {
-            let selection = try configStore.importAnimation(from: sourceURL, for: state)
-            configStore.setAnimation(selection, for: state)
+            _ = try configStore.importAnimation(from: sourceURL, for: state)
             rebuildView()
             onChange()
             onAnimationPreview(state)
         } catch {
             showAlert(title: "Could Not Import GIF", message: error.localizedDescription)
+        }
+    }
+
+    private func deleteAnimation(_ selection: String, for state: BeaconState) {
+        let alert = NSAlert()
+        alert.messageText = "Delete this animation?"
+        alert.informativeText = "The imported copy will be removed from Codex Beacon."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try configStore.deleteAnimation(selection, for: state)
+            rebuildView()
+            onChange()
+        } catch {
+            showAlert(title: "Could Not Delete GIF", message: error.localizedDescription)
         }
     }
 
